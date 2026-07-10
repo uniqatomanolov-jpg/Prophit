@@ -1,0 +1,5 @@
+node_modules
+prophit.db
+prophit.db-*
+.env
+*.log

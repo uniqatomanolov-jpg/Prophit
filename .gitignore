@@ -1,0 +1,6 @@
+node_modules/
+.env
+prophit.db
+prophit.db-*
+*.log
+.DS_Store
