@@ -57,7 +57,10 @@ async function callAnthropic(prompt) {
     }),
   });
   const data = await res.json();
-  return parseJson(data.content.map((c) => c.text || "").join(""));
+  if (!res.ok || data.error) throw new Error(`Anthropic ${res.status}: ${data.error?.message || "request failed"}`);
+  const text = (data.content || []).map((c) => c.text || "").join("");
+  if (!text) throw new Error("Anthropic: empty response");
+  return parseJson(text);
 }
 
 async function callOpenAICompatible(baseUrl, key, model, prompt) {
@@ -71,11 +74,14 @@ async function callOpenAICompatible(baseUrl, key, model, prompt) {
     }),
   });
   const data = await res.json();
-  return parseJson(data.choices[0].message.content);
+  if (!res.ok || data.error) throw new Error(`${baseUrl} ${res.status}: ${data.error?.message || "request failed"}`);
+  const msg = data.choices && data.choices[0] && data.choices[0].message;
+  if (!msg || !msg.content) throw new Error(`${baseUrl}: no content returned`);
+  return parseJson(msg.content);
 }
 
 async function callGemini(prompt) {
-  const model = process.env.GEMINI_MODEL || "gemini-2.5-flash";
+  const model = process.env.GEMINI_MODEL || "gemini-2.0-flash";
   const res = await fetch(
     `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${process.env.GEMINI_API_KEY}`,
     {
@@ -88,7 +94,12 @@ async function callGemini(prompt) {
     }
   );
   const data = await res.json();
-  return parseJson(data.candidates[0].content.parts[0].text);
+  if (!res.ok || data.error) throw new Error(`Gemini ${res.status}: ${data.error?.message || "request failed"}`);
+  const cand = data.candidates && data.candidates[0];
+  if (!cand) throw new Error(`Gemini returned no answer${data.promptFeedback?.blockReason ? " (blocked: " + data.promptFeedback.blockReason + ")" : ""}`);
+  const text = (cand.content?.parts || []).map((p) => p.text || "").join("");
+  if (!text) throw new Error(`Gemini empty response (finishReason: ${cand.finishReason || "unknown"})`);
+  return parseJson(text);
 }
 
 // ——— Model lineup ———
