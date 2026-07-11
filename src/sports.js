@@ -15,6 +15,8 @@
 export const SPORTS = {
   soccer: { family: "h2h", provider: "theoddsapi", label: "Football", markets: ["x12", "ou25"] },
   tennis: { family: "h2h", provider: "theoddsapi", label: "Tennis",   markets: ["ml"] },
+  darts: { family: "h2h", provider: "theoddsapi", label: "Tennis",   markets: ["ml"] },
+  snooker: { family: "h2h", provider: "theoddsapi", label: "Tennis",   markets: ["ml"] },
   nba:    { family: "h2h", provider: "theoddsapi", label: "NBA",      markets: ["ml"] },
   nfl:    { family: "h2h", provider: "theoddsapi", label: "NFL",      markets: ["ml"] },
 };
@@ -59,4 +61,4 @@ export const MARKET_DEFS = {
 };
 
 export const marketList = (sportKey) => SPORTS[sportKey].markets;
-export const isRace = (sportKey) => SPORTS[sportKey].family === "race";
+export const isRace = (sportKey) => SPORTS[sportKey]?.family === "race";
