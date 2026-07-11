@@ -26,7 +26,7 @@ export function parseCSV(text) {
   return rows.slice(1).map((cells) => { const r = {}; header.forEach((h, j) => (r[h] = cells[j] ?? "")); return r; });
 }
 
-const slug = (s) => String(s).trim().replace(/[^\p{L}\p{N}.-]+/gu, "-");
+const slug = (s) => String(s).trim().replace(/[^\p{L}\p{N}.-]+/gu, "-").replace(/-+/g, "-").replace(/^-|-$/g, "");
 export const manualId = (r) => `manual:${slug(r.sport)}:${slug(r.kickoff)}:${slug(r.home)}_v_${slug(r.away)}`;
 
 const MONTHS = { jan:1,feb:2,mar:3,apr:4,may:5,jun:6,jul:7,aug:8,sep:9,oct:10,nov:11,dec:12 };
@@ -124,9 +124,36 @@ function normEN(rows) {
   return null;
 }
 
+function normSpreadex(rows) {
+  if (rows.length < 3) return null;
+  const looks = rows.some((r) => r[0] === "Match Result") || rows.some((r) => r[1] === "View Coupons");
+  if (!looks) return null;
+  const mr = rows.find((r) => r[0] === "Match Result");
+  if (!mr) return null;
+  const home = mr[2], away = mr[6] || mr[4];
+  if (!home || !away) return null;
+  const kickoff = `${today()} 20:00`;
+  const NAME = { "match result": "x12", "both teams to score": "btts", "double chance": "dc",
+    "draw no bet": "dnb", "half time result": "htr", "first team to score": "fts",
+    "to qualify": "qualify", "goalscorer markets": "ags" };
+  const out = [];
+  for (const r of rows) {
+    const name = (r[0] || "").trim();
+    if (!name) continue;
+    const id = NAME[name.toLowerCase()] || slug(name).toLowerCase();
+    [[2, 3], [4, 5], [6, 7]].forEach(([ci, pi], k) => {
+      const label = (r[ci] || "").trim(); const price = num(r[pi]);
+      if (!label || price == null) return;
+      const option = id === "x12" ? (k === 0 ? "home" : k === 1 ? "draw" : "away") : label;
+      out.push({ sport: "soccer", kickoff, competition: "SpreaDex", home, away, market: id, option, odds: price });
+    });
+  }
+  return out.some((o) => o.market === "x12") ? out : null;
+}
+
 export function ingestEvents(csvText) {
   const raw = splitRows(csvText);
-  let rows = normBG(raw) || normEN(raw);
+  let rows = normBG(raw) || normSpreadex(raw) || normEN(raw);
   if (!rows) rows = parseCSV(csvText);
   const seen = new Set(); let fixtures = 0, odds = 0;
   const tx = db.transaction(() => {
