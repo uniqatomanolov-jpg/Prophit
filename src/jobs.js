@@ -53,6 +53,7 @@ export async function syncFixtures() {
 export async function generatePicks() {
   const providers = activeProviders();
   if (!providers.length) { console.warn("[predict] no AI provider keys set"); return; }
+  const deadModels = new Set();   // models with no quota this run → skip after first failure
 
   for (const f of q.upcoming.all()) {
     const dt = f.kickoff ? new Date(f.kickoff) - Date.now() : 0;
@@ -72,8 +73,8 @@ export async function generatePicks() {
     const prompt = buildPrompt(f, odds, markets);
 
     for (const provider of providers) {
+      if (deadModels.has(provider.id)) continue;   // quota:0 → skip entirely
       if (q.hasPicks.get(f.id, provider.id).n > 0) continue;
-      // Pace requests + auto-retry on rate limits (free tiers cap ~30/min).
       const gap = Number(process.env.PREDICT_GAP_MS) || 2500;
       let attempt = 0, done = false;
       while (attempt < 4 && !done) {
@@ -81,18 +82,27 @@ export async function generatePicks() {
           const picks = await provider.call(prompt);
           for (const [market, p] of Object.entries(picks)) {
             if (!p?.pick) continue;
+            const price = priceOf(market, p.pick);
+            const implied = price ? 100 / price : null;                 // bookmaker's implied %
+            const probability = p.probability ?? null;                   // Claude's true %
+            const edge = (probability != null && implied != null) ? +(probability - implied).toFixed(1) : null;
             insertPick.run({
               fixture_id: f.id, model: provider.id, market,
-              pick: String(p.pick), confidence: p.confidence ?? null,
-              price: priceOf(market, p.pick), reasoning: p.why ?? null,
+              pick: String(p.pick), confidence: p.confidence ?? probability ?? null,
+              price, reasoning: p.why ?? null, probability, edge,
             });
           }
+          const values = Object.values(picks).filter((p) => p && p.probability != null).length;
           console.log(`[predict:${f.sport}] ${provider.id} → ${f.comp}`);
           done = true;
         } catch (e) {
-          const rateLimited = /429|rate limit|quota/i.test(e.message);
-          if (rateLimited && attempt < 3) {
-            const wait = 8000 * (attempt + 1);   // back off 8s, 16s, 24s
+          // Dead free tier (limit: 0 / quota exceeded with 0 allowance) → drop for whole run.
+          if (/limit:\s*0|quota.*exceeded/i.test(e.message) && attempt === 0) {
+            console.warn(`[predict] ${provider.id} has no quota — skipping it for this run.`);
+            deadModels.add(provider.id);
+            done = true;
+          } else if (/429|rate limit/i.test(e.message) && attempt < 3) {
+            const wait = 8000 * (attempt + 1);
             console.warn(`[predict] ${provider.id} rate-limited, waiting ${wait / 1000}s…`);
             await sleep(wait);
             attempt++;
@@ -102,7 +112,7 @@ export async function generatePicks() {
           }
         }
       }
-      await sleep(gap);   // breathing room between every call
+      if (!deadModels.has(provider.id)) await sleep(gap);
     }
   }
 }

@@ -35,6 +35,11 @@ CREATE TABLE IF NOT EXISTS outcomes (
 );
 `);
 
+// safe migration — add value-betting columns if an older DB predates them
+for (const col of ["probability REAL", "edge REAL"]) {
+  try { db.exec(`ALTER TABLE picks ADD COLUMN ${col}`); } catch { /* already exists */ }
+}
+
 export const upsertFixture = db.prepare(`
   INSERT INTO fixtures (id, sport, comp, home, away, entrants, kickoff, status, score, raw)
   VALUES (@id, @sport, @comp, @home, @away, @entrants, @kickoff, @status, @score, @raw)
@@ -47,8 +52,8 @@ export const upsertOdd = db.prepare(`
 `);
 
 export const insertPick = db.prepare(`
-  INSERT OR IGNORE INTO picks (fixture_id, model, market, pick, confidence, price, reasoning)
-  VALUES (@fixture_id, @model, @market, @pick, @confidence, @price, @reasoning)
+  INSERT OR IGNORE INTO picks (fixture_id, model, market, pick, confidence, price, reasoning, probability, edge)
+  VALUES (@fixture_id, @model, @market, @pick, @confidence, @price, @reasoning, @probability, @edge)
 `);
 
 export const setOutcome = db.prepare(`
@@ -67,7 +72,7 @@ export const q = {
   fixturesAll: db.prepare(`SELECT * FROM fixtures ORDER BY kickoff DESC LIMIT 200`),
   fixturesBySport: db.prepare(`SELECT * FROM fixtures WHERE sport=@sport ORDER BY kickoff DESC LIMIT 100`),
   oddsFor: db.prepare(`SELECT market, option, price FROM odds WHERE fixture_id=?`),
-  picksFor: db.prepare(`SELECT model, market, pick, confidence, price, correct, reasoning FROM picks WHERE fixture_id=?`),
+  picksFor: db.prepare(`SELECT model, market, pick, confidence, price, correct, reasoning, probability, edge FROM picks WHERE fixture_id=?`),
   hasPicks: db.prepare(`SELECT COUNT(*) n FROM picks WHERE fixture_id=? AND model=?`),
   distinctMarkets: db.prepare(`
     SELECT DISTINCT p.market FROM picks p JOIN fixtures f ON f.id = p.fixture_id
@@ -75,7 +80,7 @@ export const q = {
   picksList: db.prepare(`
     SELECT p.fixture_id, f.sport, f.comp, f.home, f.away, f.kickoff, f.status, f.score,
            p.model, p.market, p.pick, p.confidence, p.price, p.reasoning, p.created_at,
-           p.correct, o.outcome
+           p.correct, p.probability, p.edge, o.outcome
     FROM picks p
     JOIN fixtures f ON f.id = p.fixture_id
     LEFT JOIN outcomes o ON o.fixture_id = p.fixture_id AND o.market = p.market
