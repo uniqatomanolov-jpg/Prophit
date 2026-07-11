@@ -1,3 +1,4 @@
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 import "dotenv/config";
 import { db, upsertFixture, upsertOdd, insertPick, setOutcome, gradePick, q } from "./db.js";
 import { SPORTS, isRace } from "./sports.js";
@@ -72,18 +73,36 @@ export async function generatePicks() {
 
     for (const provider of providers) {
       if (q.hasPicks.get(f.id, provider.id).n > 0) continue;
-      try {
-        const picks = await provider.call(prompt);
-        for (const [market, p] of Object.entries(picks)) {
-          if (!p?.pick) continue;
-          insertPick.run({
-            fixture_id: f.id, model: provider.id, market,
-            pick: String(p.pick), confidence: p.confidence ?? null,
-            price: priceOf(market, p.pick), reasoning: p.why ?? null,
-          });
+      // Pace requests + auto-retry on rate limits (free tiers cap ~30/min).
+      const gap = Number(process.env.PREDICT_GAP_MS) || 2500;
+      let attempt = 0, done = false;
+      while (attempt < 4 && !done) {
+        try {
+          const picks = await provider.call(prompt);
+          for (const [market, p] of Object.entries(picks)) {
+            if (!p?.pick) continue;
+            insertPick.run({
+              fixture_id: f.id, model: provider.id, market,
+              pick: String(p.pick), confidence: p.confidence ?? null,
+              price: priceOf(market, p.pick), reasoning: p.why ?? null,
+            });
+          }
+          console.log(`[predict:${f.sport}] ${provider.id} → ${f.comp}`);
+          done = true;
+        } catch (e) {
+          const rateLimited = /429|rate limit|quota/i.test(e.message);
+          if (rateLimited && attempt < 3) {
+            const wait = 8000 * (attempt + 1);   // back off 8s, 16s, 24s
+            console.warn(`[predict] ${provider.id} rate-limited, waiting ${wait / 1000}s…`);
+            await sleep(wait);
+            attempt++;
+          } else {
+            console.warn(`[predict] ${provider.id} failed ${f.id}: ${e.message}`);
+            done = true;
+          }
         }
-        console.log(`[predict:${f.sport}] ${provider.id} → ${f.comp}`);
-      } catch (e) { console.warn(`[predict] ${provider.id} failed ${f.id}: ${e.message}`); }
+      }
+      await sleep(gap);   // breathing room between every call
     }
   }
 }
