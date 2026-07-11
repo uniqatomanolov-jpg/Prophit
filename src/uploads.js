@@ -42,12 +42,48 @@ export function parseCSV(text) {
   return rows;
 }
 
-const slug = (s) => String(s).trim().replace(/[^\w.-]+/g, "-");
+const slug = (s) => String(s).trim().replace(/[^\p{L}\p{N}.-]+/gu, "-");
 export const manualId = (r) => `manual:${slug(r.sport)}:${slug(r.kickoff)}:${slug(r.home)}_v_${slug(r.away)}`;
+
+// Detect a Betano/Thunderbit-style export (Bulgarian headers: Мач, Коефициент 1/X/2)
+// and convert each row into standard 1X2 event rows. Returns null if not that format.
+function normalizeBetano(rows) {
+  if (!rows.length) return null;
+  const keys = Object.keys(rows[0]);
+  const has = (frag) => keys.some((k) => k.includes(frag));
+  const looksBetano = (has("мач") || has("match")) && has("коефициент");
+  if (!looksBetano) return null;
+
+  const kMatch = keys.find((k) => k.includes("мач") || k === "match");
+  const kTime = keys.find((k) => k.includes("час") || k.includes("start") || k.includes("time"));
+  const k1 = keys.find((k) => k.includes("коефициент 1") || k.endsWith(" 1") || k === "1");
+  const kX = keys.find((k) => k.includes("коефициент x") || k.endsWith(" x") || k === "x");
+  const k2 = keys.find((k) => k.includes("коефициент 2") || k.endsWith(" 2") || k === "2");
+  const today = new Date().toISOString().slice(0, 10);
+
+  const out = [];
+  for (const r of rows) {
+    const match = (r[kMatch] || "").trim();
+    const o1 = r[k1], ox = r[kX], o2 = r[k2];
+    if (!match || !o1 || !o2) continue;             // skip league-only / no-odds rows
+    const idx = match.indexOf(" - ");
+    if (idx < 0) continue;
+    const home = match.slice(0, idx).trim();
+    const away = match.slice(idx + 3).trim();
+    const kickoff = kTime && r[kTime] ? `${today} ${r[kTime].trim()}` : today;
+    const base = { sport: "soccer", kickoff, competition: "Betano", home, away };
+    out.push({ ...base, market: "x12", option: "home", line: "", odds: o1 });
+    if (ox) out.push({ ...base, market: "x12", option: "draw", line: "", odds: ox });
+    out.push({ ...base, market: "x12", option: "away", line: "", odds: o2 });
+  }
+  return out;
+}
 
 // —— ingest events + odds ——
 export function ingestEvents(csvText) {
-  const rows = parseCSV(csvText);
+  let rows = parseCSV(csvText);
+  const betano = normalizeBetano(rows);   // auto-convert Betano/Thunderbit exports
+  if (betano) rows = betano;
   const seenFixture = new Set();
   let fixtures = 0, odds = 0;
   const tx = db.transaction(() => {

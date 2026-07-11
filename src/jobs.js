@@ -55,9 +55,11 @@ export async function generatePicks() {
 
   for (const f of q.upcoming.all()) {
     const dt = f.kickoff ? new Date(f.kickoff) - Date.now() : 0;
-    // API fixtures: predict within 36h of kickoff. Manual uploads (id starts "manual:") always eligible.
+    // Predict games within PREDICT_WINDOW_HOURS of kickoff (default 72h).
+    // Manual uploads (id starts "manual:") are always eligible.
+    const windowMs = (Number(process.env.PREDICT_WINDOW_HOURS) || 72) * 3600e3;
     const isManual = String(f.id).startsWith("manual:");
-    if (!isManual && (!f.kickoff || dt <= 0 || dt > 36 * 3600e3)) continue;
+    if (!isManual && (!f.kickoff || dt <= 0 || dt > windowMs)) continue;
 
     const odds = q.oddsFor.all(f.id);
     const priceOf = (market, pick) =>
