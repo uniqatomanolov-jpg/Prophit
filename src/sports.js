@@ -13,12 +13,12 @@
 // (Player props, cards, corners, spreads/other totals need extra feeds — removed
 //  until wired, so nothing shows a market it can't grade.)
 export const SPORTS = {
-  soccer: { family: "h2h", provider: "theoddsapi", label: "Football", markets: ["x12", "ou25"] },
-  tennis: { family: "h2h", provider: "theoddsapi", label: "Tennis",   markets: ["ml"] },
-  darts: { family: "h2h", provider: "theoddsapi", label: "Tennis",   markets: ["ml"] },
-  snooker: { family: "h2h", provider: "theoddsapi", label: "Tennis",   markets: ["ml"] },
-  nba:    { family: "h2h", provider: "theoddsapi", label: "NBA",      markets: ["ml"] },
-  nfl:    { family: "h2h", provider: "theoddsapi", label: "NFL",      markets: ["ml"] },
+  soccer:  { family: "h2h", provider: "theoddsapi", label: "Football", markets: ["x12", "ou25"] },
+  tennis:  { family: "h2h", provider: "theoddsapi", label: "Tennis",   markets: ["ml"] },
+  nba:     { family: "h2h", provider: "theoddsapi", label: "Basketball", markets: ["ml", "spread", "total"] },
+  nfl:     { family: "h2h", provider: "theoddsapi", label: "NFL",      markets: ["ml"] },
+  darts:   { family: "h2h", provider: "theoddsapi", label: "Darts",    markets: ["ml"] },
+  snooker: { family: "h2h", provider: "theoddsapi", label: "Snooker",  markets: ["result"] },
 };
 
 // Human-readable market metadata used to build the AI prompt per sport.
@@ -28,7 +28,16 @@ export const MARKET_DEFS = {
   dc: "double chance (1X/12/X2)",
   ah: "asian handicap — state the line you take",
   ou25: "total goals over/under 2.5",
+  goals_ou: "total goals over/under — state the exact line",
   btts: "both teams to score (yes/no)",
+  corners_ou: "total corners over/under — state the exact line",
+  cards_ou: "total cards over/under — state the exact line",
+  shots_ou: "total shots over/under — state the exact line",
+  p_shots: "player shots over/under — state the player and line",
+  p_tackles: "player tackles over/under — state the player and line",
+  p_fouls: "player fouls over/under — state the player and line",
+  p_card: "player to be carded/booked (player name, yes)",
+  ags: "anytime goalscorer (player name)",
   cards45: "total cards over/under 4.5",
   corners95: "total corners over/under 9.5",
   cs: "correct score (e.g. 2-1)",
