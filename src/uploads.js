@@ -1,26 +1,11 @@
-// ————————————————————————————————————————————————————————
-// Manual CSV upload — add ANY events, markets and odds the API doesn't cover
-// (e.g. corners, cards, player props) by uploading a spreadsheet each day.
-// Export your Excel sheet as CSV and POST it. No dependencies.
-//
-// EVENTS CSV columns (header row required):
-//   sport,kickoff,competition,home,away,market,option,line,odds
-//   - one row per option. Multiple rows (same sport+kickoff+home+away) = one event.
-//   - `line` optional; if present it's appended to the option ("Over" + "9.5" → "Over 9.5").
-//   - kickoff: ISO or "YYYY-MM-DD HH:MM".
-//
-// RESULTS CSV columns (to settle manual markets so they count toward accuracy/ROI):
-//   sport,kickoff,home,away,market,outcome[,score]
-// ————————————————————————————————————————————————————————
+// Manual CSV upload — auto-detects: standard template, Bulgarian Betano export,
+// and English Betano/Thunderbit exports for football, tennis, basketball, darts, snooker.
 import { db, upsertFixture, upsertOdd, setOutcome, markFinal, gradePick, q } from "./db.js";
 import { isPickCorrect } from "./settle.js";
 
-// minimal, quote-aware CSV parser → array of row objects
-export function parseCSV(text) {
-  const rows = [];
+function splitRows(text) {
   const lines = text.replace(/\r\n?/g, "\n").split("\n").filter((l) => l.trim().length);
-  if (!lines.length) return rows;
-  const splitLine = (line) => {
+  const parse = (line) => {
     const out = []; let cur = "", inQ = false;
     for (let i = 0; i < line.length; i++) {
       const c = line[i];
@@ -29,101 +14,157 @@ export function parseCSV(text) {
       else if (c === ",") { out.push(cur); cur = ""; }
       else cur += c;
     }
-    out.push(cur);
-    return out.map((s) => s.trim());
+    out.push(cur); return out.map((s) => s.trim());
   };
-  const header = splitLine(lines[0]).map((h) => h.toLowerCase());
-  for (let i = 1; i < lines.length; i++) {
-    const cells = splitLine(lines[i]);
-    const row = {};
-    header.forEach((h, j) => (row[h] = cells[j] ?? ""));
-    rows.push(row);
-  }
-  return rows;
+  return lines.map(parse);
+}
+
+export function parseCSV(text) {
+  const rows = splitRows(text);
+  if (!rows.length) return [];
+  const header = rows[0].map((h) => h.toLowerCase());
+  return rows.slice(1).map((cells) => { const r = {}; header.forEach((h, j) => (r[h] = cells[j] ?? "")); return r; });
 }
 
 const slug = (s) => String(s).trim().replace(/[^\p{L}\p{N}.-]+/gu, "-");
 export const manualId = (r) => `manual:${slug(r.sport)}:${slug(r.kickoff)}:${slug(r.home)}_v_${slug(r.away)}`;
 
-// Detect a Betano/Thunderbit-style export (Bulgarian headers: Мач, Коефициент 1/X/2)
-// and convert each row into standard 1X2 event rows. Returns null if not that format.
-function normalizeBetano(rows) {
+const MONTHS = { jan:1,feb:2,mar:3,apr:4,may:5,jun:6,jul:7,aug:8,sep:9,oct:10,nov:11,dec:12 };
+const YEAR = new Date().getFullYear();
+const today = () => new Date().toISOString().slice(0, 10);
+const pad = (n) => String(n).padStart(2, "0");
+function dateFrom(dstr, tstr) {
+  const t = (tstr || "").trim() || "00:00";
+  if (!dstr) return `${today()} ${t}`;
+  const d = dstr.trim();
+  let m = d.match(/^(\d{1,2})\/(\d{1,2})$/);
+  if (m) return `${YEAR}-${pad(m[2])}-${pad(m[1])} ${t}`;
+  m = d.match(/^(\d{1,2})\s+([A-Za-z]{3})/);
+  if (m && MONTHS[m[2].toLowerCase()]) return `${YEAR}-${pad(MONTHS[m[2].toLowerCase()])}-${pad(m[1])} ${t}`;
+  return `${today()} ${t}`;
+}
+const num = (x) => { const n = parseFloat(String(x).replace(",", ".")); return Number.isNaN(n) ? null : n; };
+const lineFrom = (label) => { const m = String(label).match(/-?\d+(\.\d+)?/); return m ? m[0] : ""; };
+
+function normBG(rows) {
   if (!rows.length) return null;
-  const keys = Object.keys(rows[0]);
-  const has = (frag) => keys.some((k) => k.includes(frag));
-  const looksBetano = (has("мач") || has("match")) && has("коефициент");
-  if (!looksBetano) return null;
-
-  const kMatch = keys.find((k) => k.includes("мач") || k === "match");
-  const kTime = keys.find((k) => k.includes("час") || k.includes("start") || k.includes("time"));
-  const k1 = keys.find((k) => k.includes("коефициент 1") || k.endsWith(" 1") || k === "1");
-  const kX = keys.find((k) => k.includes("коефициент x") || k.endsWith(" x") || k === "x");
-  const k2 = keys.find((k) => k.includes("коефициент 2") || k.endsWith(" 2") || k === "2");
-  const today = new Date().toISOString().slice(0, 10);
-
+  const head = rows[0].map((c) => c.toLowerCase());
+  if (!(head.some((c) => c.includes("мач")) && head.some((c) => c.includes("коефициент")))) return null;
+  const iM = head.findIndex((c) => c.includes("мач"));
+  const iT = head.findIndex((c) => c.includes("час"));
+  const i1 = head.findIndex((c) => c.includes("коефициент 1"));
+  const iX = head.findIndex((c) => c.includes("коефициент x"));
+  const i2 = head.findIndex((c) => c.includes("коефициент 2"));
   const out = [];
-  for (const r of rows) {
-    const match = (r[kMatch] || "").trim();
-    const o1 = r[k1], ox = r[kX], o2 = r[k2];
-    if (!match || !o1 || !o2) continue;             // skip league-only / no-odds rows
-    const idx = match.indexOf(" - ");
-    if (idx < 0) continue;
-    const home = match.slice(0, idx).trim();
-    const away = match.slice(idx + 3).trim();
-    const kickoff = kTime && r[kTime] ? `${today} ${r[kTime].trim()}` : today;
-    const base = { sport: "soccer", kickoff, competition: "Betano", home, away };
-    out.push({ ...base, market: "x12", option: "home", line: "", odds: o1 });
-    if (ox) out.push({ ...base, market: "x12", option: "draw", line: "", odds: ox });
-    out.push({ ...base, market: "x12", option: "away", line: "", odds: o2 });
+  for (const r of rows.slice(1)) {
+    const match = (r[iM] || "").trim(); const o1 = num(r[i1]), o2 = num(r[i2]), ox = num(r[iX]);
+    const idx = match.indexOf(" - "); if (idx < 0 || o1 == null || o2 == null) continue;
+    const base = { sport: "soccer", kickoff: dateFrom(null, r[iT]), competition: "Betano", home: match.slice(0, idx).trim(), away: match.slice(idx + 3).trim() };
+    out.push({ ...base, market: "x12", option: "home", odds: o1 });
+    if (ox != null) out.push({ ...base, market: "x12", option: "draw", odds: ox });
+    out.push({ ...base, market: "x12", option: "away", odds: o2 });
   }
-  return out;
+  return out.length ? out : null;
 }
 
-// —— ingest events + odds ——
+function normEN(rows) {
+  if (rows.length < 2) return null;
+  const n = rows[0].length;
+  const url = (c) => typeof c === "string" && c.startsWith("http");
+  const data = rows.slice(1);
+  const out = [];
+  const push = (o) => { if (o.odds != null) out.push(o); };
+
+  if (n === 6 && data.some((r) => url(r[1]))) {
+    for (const r of data) { if (!url(r[1])) continue;
+      const base = { sport: "darts", kickoff: dateFrom(null, r[0]), competition: "Darts", home: r[2], away: r[3] };
+      push({ ...base, market: "ml", option: r[2], odds: num(r[4]) });
+      push({ ...base, market: "ml", option: r[3], odds: num(r[5]) }); }
+    return out.length ? out : null;
+  }
+  if (n === 7 && data.some((r) => url(r[1]))) {
+    for (const r of data) { if (!url(r[1])) continue;
+      const base = { sport: "snooker", kickoff: dateFrom(null, r[0]), competition: "Snooker", home: r[2], away: r[3] };
+      push({ ...base, market: "result", option: "home", odds: num(r[4]) });
+      push({ ...base, market: "result", option: "draw", odds: num(r[5]) });
+      push({ ...base, market: "result", option: "away", odds: num(r[6]) }); }
+    return out.length ? out : null;
+  }
+  if (n === 12 && data.some((r) => url(r[3]))) {
+    for (const r of data) { if (!url(r[3])) continue;
+      const base = { sport: "soccer", kickoff: dateFrom(r[1], r[2]), competition: r[0] || "Betano", home: r[4], away: r[5] };
+      push({ ...base, market: "x12", option: "home", odds: num(r[7]) });
+      push({ ...base, market: "x12", option: "draw", odds: num(r[9]) });
+      push({ ...base, market: "x12", option: "away", odds: num(r[11]) }); }
+    return out.length ? out : null;
+  }
+  if (n === 19) {
+    for (const r of data) {
+      for (const off of [3, 12]) {
+        if (!url(r[off])) continue;
+        const base = { sport: "tennis", kickoff: dateFrom(r[off - 2], r[off - 1]), competition: r[0] || "Tennis", home: r[off + 1], away: r[off + 2] };
+        push({ ...base, market: "ml", option: r[off + 1], odds: num(r[off + 4]) });
+        push({ ...base, market: "ml", option: r[off + 2], odds: num(r[off + 6]) });
+      }
+    }
+    return out.length ? out : null;
+  }
+  if (n === 20 && data.some((r) => url(r[7]))) {
+    for (const r of data) { if (!url(r[7])) continue;
+      const home = r[8], away = r[9];
+      const base = { sport: "nba", kickoff: dateFrom(r[2], r[6]), competition: r[1] || "Basketball", home, away };
+      push({ ...base, market: "ml", option: home, odds: num(r[10]) });
+      push({ ...base, market: "ml", option: away, odds: num(r[11]) });
+      push({ ...base, market: "spread", option: `${home} ${r[12]}`, line: lineFrom(r[12]), odds: num(r[13]) });
+      push({ ...base, market: "spread", option: `${away} ${r[14]}`, line: lineFrom(r[14]), odds: num(r[15]) });
+      push({ ...base, market: "total", option: `Over ${lineFrom(r[16])}`, line: lineFrom(r[16]), odds: num(r[17]) });
+      push({ ...base, market: "total", option: `Under ${lineFrom(r[18])}`, line: lineFrom(r[18]), odds: num(r[19]) }); }
+    return out.length ? out : null;
+  }
+  return null;
+}
+
 export function ingestEvents(csvText) {
-  let rows = parseCSV(csvText);
-  const betano = normalizeBetano(rows);   // auto-convert Betano/Thunderbit exports
-  if (betano) rows = betano;
-  const seenFixture = new Set();
-  let fixtures = 0, odds = 0;
+  const raw = splitRows(csvText);
+  let rows = normBG(raw) || normEN(raw);
+  if (!rows) rows = parseCSV(csvText);
+  const seen = new Set(); let fixtures = 0, odds = 0;
   const tx = db.transaction(() => {
     for (const r of rows) {
       if (!r.sport || !r.home || !r.away || !r.market) continue;
       const id = manualId(r);
-      if (!seenFixture.has(id)) {
-        upsertFixture.run({
-          id, sport: r.sport.toLowerCase(),
-          comp: r.competition || "Manual",
-          home: r.home, away: r.away, entrants: null,
-          kickoff: r.kickoff || null, status: "upcoming", score: null,
-          raw: JSON.stringify({ source: "manual" }),
-        });
-        seenFixture.add(id); fixtures++;
+      if (!seen.has(id)) {
+        upsertFixture.run({ id, sport: String(r.sport).toLowerCase(), comp: r.competition || "Manual",
+          home: r.home, away: r.away, entrants: null, kickoff: r.kickoff || null, status: "upcoming",
+          score: null, raw: JSON.stringify({ source: "manual" }) });
+        seen.add(id); fixtures++;
       }
-      const option = r.line ? `${r.option} ${r.line}`.trim() : r.option;
-      const price = parseFloat(r.odds);
-      if (option && !Number.isNaN(price)) { upsertOdd.run({ fixture_id: id, market: r.market, option, price }); odds++; }
+      const option = r.line && !String(r.option).includes(String(r.line)) ? `${r.option} ${r.line}`.trim() : r.option;
+      const price = typeof r.odds === "number" ? r.odds : num(r.odds);
+      if (option && price != null) { upsertOdd.run({ fixture_id: id, market: r.market, option, price }); odds++; }
     }
   });
   tx();
   return { fixtures, odds, rows: rows.length };
 }
 
-// —— ingest results → settle manual markets ——
+const norm = (x) => String(x).trim().toLowerCase();
 export function ingestResults(csvText) {
-  const rows = parseCSV(csvText);
+  const raw = splitRows(csvText);
+  const rows = normBG(raw) || parseCSV(csvText);
   let settled = 0, graded = 0;
   const tx = db.transaction(() => {
     for (const r of rows) {
-      if (!r.sport || !r.home || !r.away || !r.market || r.outcome === "") continue;
+      if (!r.sport || !r.home || !r.away || !r.market || r.outcome === "" || r.outcome == null) continue;
       const id = manualId(r);
       setOutcome.run({ fixture_id: id, market: r.market, outcome: JSON.stringify(r.outcome) });
-      if (r.score) markFinal.run({ id, score: r.score }); else markFinal.run({ id, score: null });
+      markFinal.run({ id, score: r.score || null });
       settled++;
       for (const p of q.picksFor.all(id)) {
         if (p.market !== r.market) continue;
-        const correct = isPickCorrect(p.market, p.pick, r.outcome);
-        if (correct != null) { gradePick.run({ correct, fixture_id: id, model: p.model, market: p.market }); graded++; }
+        let c = isPickCorrect(p.market, p.pick, r.outcome);
+        if (c == null) c = norm(p.pick) === norm(r.outcome) ? 1 : 0;
+        gradePick.run({ correct: c, fixture_id: id, model: p.model, market: p.market }); graded++;
       }
     }
   });
