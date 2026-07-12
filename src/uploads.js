@@ -39,7 +39,16 @@ const today = () => new Date().toISOString().slice(0, 10);
 const pad = (n) => String(n).padStart(2, "0");
 function dateFrom(dstr, tstr) {
   const t = (tstr || "").trim() || "00:00";
-  if (!dstr) return `${today()} ${t}`;
+  if (!dstr) {
+    // time-only rows (darts/snooker/F1 scrapes): if that time already passed today,
+    // the game is tomorrow — otherwise it would be hidden as "already started".
+    const cand = new Date(`${today()}T${t.length === 4 ? "0" + t : t}:00`);
+    if (!Number.isNaN(cand.getTime()) && cand.getTime() < Date.now() - 30 * 60e3) {
+      const tm = new Date(Date.now() + 24 * 3600e3).toISOString().slice(0, 10);
+      return `${tm} ${t}`;
+    }
+    return `${today()} ${t}`;
+  }
   const d = dstr.trim();
   let m = d.match(/^(\d{1,2})\/(\d{1,2})$/);
   if (m) return `${YEAR}-${pad(m[2])}-${pad(m[1])} ${t}`;
