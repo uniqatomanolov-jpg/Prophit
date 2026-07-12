@@ -5,13 +5,17 @@ import { isPickCorrect } from "./settle.js";
 
 function splitRows(text) {
   const lines = text.replace(/\r\n?/g, "\n").split("\n").filter((l) => l.trim().length);
+  // auto-detect delimiter: European Excel exports "CSV" with semicolons; also handle tabs
+  const probe = lines.slice(0, 5).join("\n");
+  const count = (ch) => (probe.match(new RegExp("\\" + ch, "g")) || []).length;
+  const DELIM = count(";") > count(",") ? ";" : (count("\t") > count(",") ? "\t" : ",");
   const parse = (line) => {
     const out = []; let cur = "", inQ = false;
     for (let i = 0; i < line.length; i++) {
       const c = line[i];
       if (inQ) { if (c === '"' && line[i + 1] === '"') { cur += '"'; i++; } else if (c === '"') inQ = false; else cur += c; }
       else if (c === '"') inQ = true;
-      else if (c === ",") { out.push(cur); cur = ""; }
+      else if (c === DELIM) { out.push(cur); cur = ""; }
       else cur += c;
     }
     out.push(cur); return out.map((s) => s.trim());
