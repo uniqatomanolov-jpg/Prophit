@@ -3,34 +3,34 @@
 
 import { SPORTS, MARKET_DEFS, marketList, isRace } from "../sports.js";
 
-// Build the required-JSON spec from a market list (sport defaults + any uploaded markets).
+// Value-betting spec: Claude estimates the TRUE probability of each market's best pick.
+// We compare that to the bookmaker's implied probability to compute the edge (value).
 function marketsSpec(markets) {
   const lines = markets.map(
-    (m) => `  "${m}": { "pick": "<${MARKET_DEFS[m] || m}>", "confidence": 0-100, "why": "one sentence" }`
+    (m) => `  "${m}": { "pick": "<${MARKET_DEFS[m] || m}>", "probability": 0-100, "confidence": 0-100, "why": "one sentence on why the bookmaker may be mispricing this" }`
   );
-  return `Return ONLY a JSON object, no markdown, with exactly these keys (omit a key only if you truly cannot pick):\n{\n${lines.join(",\n")}\n}`;
+  return `Return ONLY a JSON object, no markdown, with exactly these keys (omit a key only if you have no read on it):\n{\n${lines.join(",\n")}\n}\n"probability" = your honest true chance (%) that the pick wins. Be calibrated — most edges are small.`;
 }
 
 export function buildPrompt(fixture, odds, markets) {
   const sportKey = fixture.sport;
-  const oddsLines = odds.map((o) => `${o.market} | ${o.option} @ ${o.price}`).join("\n") || "(odds unavailable — use your judgment)";
+  const oddsLines = odds.map((o) => `${o.market} | ${o.option} @ ${o.price}  (bookmaker implies ${(100 / o.price).toFixed(1)}%)`).join("\n") || "(odds unavailable)";
   const label = SPORTS[sportKey]?.label || sportKey;
-  // markets = caller-provided (sport defaults ∪ uploaded markets); fall back to sport list
   const mkts = markets && markets.length ? markets : (SPORTS[sportKey] ? marketList(sportKey) : []);
 
   const subject = isRace(sportKey)
     ? `EVENT: ${fixture.comp}\nENTRANTS: ${(JSON.parse(fixture.entrants || "[]")).join(", ")}`
     : `MATCH: ${fixture.home} vs ${fixture.away}\nCOMPETITION: ${fixture.comp}`;
 
-  return `You are a professional ${label} analyst competing against other AI models on prediction accuracy and ROI.
+  return `You are a sharp ${label} betting analyst. Your job is to beat the bookmakers by finding VALUE — outcomes where the true probability is higher than the bookmaker's odds imply.
 
 ${subject}
 START (UTC): ${fixture.kickoff}
 
-CURRENT BOOKMAKER ODDS:
+BOOKMAKER ODDS (with the probability each price implies):
 ${oddsLines}
 
-Use everything you know about form, matchups, injuries, venue and conditions. Be decisive; calibrate confidence honestly (55 = slight lean, 80 = strong conviction). For any handicap/total market, state the exact line you are taking inside the pick string.
+For each market, pick the outcome you think offers the best value and estimate its TRUE probability of winning. If your true probability exceeds the bookmaker's implied probability, that's a value bet. Use everything you know about form, injuries, matchups, venue and conditions. Do not force a bet — only lean in where you genuinely disagree with the price. Keep your picks logically CONSISTENT with each other across markets of this same match (e.g. never pick a 90-minute draw in 1X2 and also a team to win in regular time).
 ${marketsSpec(mkts)}`;
 }
 
@@ -102,19 +102,9 @@ async function callGemini(prompt) {
   return parseJson(text);
 }
 
-// ——— Model lineup ———
-// Provider id = how the pick is labeled in the app (honest — the real model called).
-//   claude  → Anthropic (paid; add a key when you have one)
-//   gemini  → Google AI Studio (free tier)
-//   llama   → Groq  (Llama 3.3 70B, free)
-//   gptoss  → Cerebras (GPT-OSS 120B, free)
+// ——— Claude vs the Bookies — single sharp analyst ———
 export const PROVIDERS = [
   { id: "claude", envKey: "ANTHROPIC_API_KEY", call: callAnthropic },
-  { id: "gemini", envKey: "GEMINI_API_KEY", call: callGemini },
-  { id: "llama", envKey: "GROQ_API_KEY",
-    call: (p) => callOpenAICompatible("https://api.groq.com/openai/v1", process.env.GROQ_API_KEY, process.env.GROQ_MODEL || "llama-3.3-70b-versatile", p) },
-  { id: "gptoss", envKey: "CEREBRAS_API_KEY",
-    call: (p) => callOpenAICompatible("https://api.cerebras.ai/v1", process.env.CEREBRAS_API_KEY, process.env.CEREBRAS_MODEL || "gpt-oss-120b", p) },
 ];
 
 export function activeProviders() {

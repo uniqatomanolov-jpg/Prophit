@@ -132,4 +132,20 @@ export async function fetchResult(fixture) {
   return base;
 }
 
-export const theoddsapi = { fetchFixtures, fetchOdds, fetchResult };
+// all completed games for a sport (across its league keys) — for name-matched settling
+export async function fetchScoresList(sportKey) {
+  const out = [];
+  for (const sk of SPORT_KEYS[sportKey] || []) {
+    try {
+      const scores = await api(`/sports/${sk}/scores`, { daysFrom: 3 });
+      for (const m of scores || []) {
+        if (!m.completed || !m.scores) continue;
+        const byName = Object.fromEntries(m.scores.map((x) => [x.name, Number(x.score)]));
+        out.push({ home: m.home_team, away: m.away_team, hs: byName[m.home_team], as: byName[m.away_team] });
+      }
+    } catch (e) { console.warn(`[scores:${sk}] ${e.message}`); }
+  }
+  return out;
+}
+
+export const theoddsapi = { fetchFixtures, fetchOdds, fetchResult, fetchScoresList };
