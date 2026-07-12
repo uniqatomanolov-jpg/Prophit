@@ -96,6 +96,7 @@ export const q = {
     WHERE p.correct IS NOT NULL AND (@sport = 'all' OR f.sport = @sport)
     ORDER BY f.kickoff DESC LIMIT 400`),
   // headline P&L stats (settled Claude picks only — honest record)
+  distinctSports: db.prepare(`SELECT DISTINCT sport FROM fixtures ORDER BY sport`),
   unsettledPast: db.prepare(`
     SELECT f.id, f.sport, f.comp, f.home, f.away, f.kickoff,
       (SELECT COUNT(*) FROM picks p WHERE p.fixture_id=f.id) npicks

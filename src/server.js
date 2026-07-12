@@ -3,6 +3,12 @@ import express from "express";
 import cron from "node-cron";
 import { q, db, markFinal, gradePick } from "./db.js";
 import { syncFixtures, generatePicks, gradeFinished, correctFromScore } from "./jobs.js";
+let predictBusy = false;
+function predictSoon() {
+  if (predictBusy) return;
+  predictBusy = true;
+  generatePicks().catch((e) => console.error("[auto-predict]", e.message)).finally(() => { predictBusy = false; });
+}
 import { ingestEvents, ingestResults } from "./uploads.js";
 
 const app = express();
@@ -121,6 +127,10 @@ app.get("/api/track", (req, res) => {
 });
 
 // distinct markets present (for the per-market leaderboard selector)
+app.get("/api/sports", (_, res) => {
+  res.json(q.distinctSports.all().map((r) => r.sport));
+});
+
 app.get("/api/markets", (req, res) => {
   res.json(q.distinctMarkets.all({ sport: req.query.sport || "all" }).map((r) => r.market));
 });
@@ -164,7 +174,11 @@ app.post("/api/settle", requireAdmin, (req, res) => {
 });
 
 app.post("/api/upload/events", requireAdmin, (req, res) => {
-  try { res.json(ingestEvents(req.body || "")); }
+  try {
+    const result = ingestEvents(req.body || "");
+    res.json(result);
+    if (result.fixtures > 0) { console.log("[upload] auto-predicting new events…"); predictSoon(); }
+  }
   catch (e) { res.status(400).json({ error: e.message }); }
 });
 app.post("/api/upload/results", requireAdmin, (req, res) => {

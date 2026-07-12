@@ -228,7 +228,23 @@ function normSpreadexList(rows) {
     if (!match.includes(" v ") || o1 == null || o2 == null) continue;
     if (/outright/i.test(match)) continue;
     const [home, away] = match.split(" v ").map((x) => x.trim());
-    const sport = /atp|wta|wimbledon|challenger|us open|roland|australian/i.test(comp) ? "tennis" : null;
+    const SPORT_HINTS = [
+      [/atp|wta|wimbledon|challenger|us open|roland|australian/i, "tennis"],
+      [/nba|eurobasket|basket|fiba/i, "nba"],
+      [/volley/i, "volleyball"],
+      [/darts|pdc/i, "darts"],
+      [/snooker/i, "snooker"],
+      [/ufc|mma|cage/i, "mma"],
+      [/boxing|heavyweight|wbc|wba|ibf/i, "boxing"],
+      [/table tennis|tt cup|liga pro/i, "tabletennis"],
+      [/esport|cs2|counter.strike|dota|league of legends|valorant/i, "esports"],
+      [/nhl|hockey|khl/i, "nhl"],
+      [/mlb|baseball/i, "mlb"],
+      [/cricket|t20|ipl|odi/i, "cricket"],
+      [/handball/i, "handball"],
+    ];
+    let sport = null;
+    for (const [rx, sp] of SPORT_HINTS) { if (rx.test(comp)) { sport = sp; break; } }
     if (!sport) continue;
     const kickoff = whenToKickoff(r[4]);
     out.push({ sport, kickoff, competition: comp, home, away, market: "ml", option: home, odds: o1 });
