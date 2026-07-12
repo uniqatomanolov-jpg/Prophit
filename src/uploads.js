@@ -126,7 +126,7 @@ function normEN(rows) {
 
 function normSpreadex(rows) {
   if (rows.length < 3) return null;
-  const looks = rows.some((r) => r[0] === "Match Result") || rows.some((r) => r[1] === "View Coupons");
+  const looks = rows[0].some((c) => String(c).toLowerCase().includes("p-panel")) || rows.some((r) => r[1] === "View Coupons");
   if (!looks) return null;
   const mr = rows.find((r) => r[0] === "Match Result");
   if (!mr) return null;
@@ -151,18 +151,67 @@ function normSpreadex(rows) {
   return out.some((o) => o.market === "x12") ? out : null;
 }
 
+function normBetanoMatch(rows) {
+  if (rows.length < 3) return null;
+  const head = rows[0].map((c) => String(c).toLowerCase());
+  if (!(head.some((c) => c.includes("s-name")) && head.some((c) => c.includes("tw-text-s")))) return null;
+  let home, away;
+  const teamRow = rows.find((r) => ["to qualify", "draw no bet"].includes((r[0] || "").toLowerCase()));
+  if (teamRow) { home = teamRow[1]; away = teamRow[3]; }
+  if (!home || !away) {
+    const dc = rows.find((r) => (r[0] || "").toLowerCase() === "double chance");
+    if (dc) { home = (dc[1] || "").split(" or ")[0]; const m2 = (dc[3] || "").split(" or "); away = m2[0] === home ? m2[1] : m2[0]; }
+  }
+  if (!home || !away) return null;
+  const NAME = { "match result": "x12", "both teams to score": "btts", "double chance": "dc",
+    "draw no bet": "dnb", "half time result": "htr", "to qualify": "qualify",
+    "over/under total goals": "goals_ou", "goalscorer markets": "ags", "anytime goalscorer": "ags" };
+  const kickoff = `${today()} 20:00`;
+  const out = [];
+  for (const r of rows.slice(1)) {
+    const name = (r[0] || "").trim(); if (!name) continue;
+    const id = NAME[name.toLowerCase()] || slug(name).toLowerCase();
+    const seen = new Set();
+    [[1, 2], [3, 4], [5, 6], [7, 8], [9, 10], [11, 12]].forEach(([ci, pi]) => {
+      const label = (r[ci] || "").trim(); const price = num(r[pi]);
+      if (!label || price == null) return;
+      let option = label;
+      if (id === "x12") option = label === "1" ? "home" : label === "X" ? "draw" : label === "2" ? "away" : label;
+      if (seen.has(option)) return;                 // keep the primary (first) line only
+      seen.add(option);
+      out.push({ sport: "soccer", kickoff, competition: "Betano", home, away, market: id, option, odds: price });
+    });
+  }
+  return out.some((o) => o.market === "x12") ? out : null;
+}
+
+const RACE_SPORTS = new Set(["f1", "motogp", "nascar", "golf", "cycling"]);
+
 export function ingestEvents(csvText) {
   const raw = splitRows(csvText);
-  let rows = normBG(raw) || normSpreadex(raw) || normEN(raw);
+  let rows = normBG(raw) || normSpreadex(raw) || normBetanoMatch(raw) || normEN(raw);
   if (!rows) rows = parseCSV(csvText);
   const seen = new Set(); let fixtures = 0, odds = 0;
+  // pre-pass: collect entrants for race events (drivers/riders = the options)
+  const entrantsMap = {};
+  for (const r of rows) {
+    const sp = String(r.sport || "").toLowerCase();
+    if (!RACE_SPORTS.has(sp) || !r.home || !r.option) continue;
+    if (r.away == null || r.away === undefined) r.away = "";
+    const id = manualId(r);
+    (entrantsMap[id] = entrantsMap[id] || new Set()).add(String(r.option).replace(/\s+(over|under).*$/i, ""));
+  }
   const tx = db.transaction(() => {
     for (const r of rows) {
-      if (!r.sport || !r.home || !r.away || !r.market) continue;
+      const sp = String(r.sport || "").toLowerCase();
+      const isRaceSport = RACE_SPORTS.has(sp);
+      if (isRaceSport && (r.away == null || r.away === "")) r.away = "";
+      if (!r.sport || !r.home || (!isRaceSport && !r.away) || !r.market) continue;
       const id = manualId(r);
       if (!seen.has(id)) {
-        upsertFixture.run({ id, sport: String(r.sport).toLowerCase(), comp: r.competition || "Manual",
-          home: r.home, away: r.away, entrants: null, kickoff: r.kickoff || null, status: "upcoming",
+        const ent = entrantsMap[id] ? JSON.stringify([...entrantsMap[id]]) : null;
+        upsertFixture.run({ id, sport: sp, comp: r.competition || "Manual",
+          home: r.home, away: r.away || "", entrants: ent, kickoff: r.kickoff || null, status: "upcoming",
           score: null, raw: JSON.stringify({ source: "manual" }) });
         seen.add(id); fixtures++;
       }
@@ -182,7 +231,9 @@ export function ingestResults(csvText) {
   let settled = 0, graded = 0;
   const tx = db.transaction(() => {
     for (const r of rows) {
-      if (!r.sport || !r.home || !r.away || !r.market || r.outcome === "" || r.outcome == null) continue;
+      const sp = String(r.sport || "").toLowerCase();
+      if (RACE_SPORTS.has(sp) && (r.away == null)) r.away = "";
+      if (!r.sport || !r.home || (!RACE_SPORTS.has(sp) && !r.away) || !r.market || r.outcome === "" || r.outcome == null) continue;
       const id = manualId(r);
       setOutcome.run({ fixture_id: id, market: r.market, outcome: JSON.stringify(r.outcome) });
       markFinal.run({ id, score: r.score || null });
