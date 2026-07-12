@@ -96,6 +96,13 @@ export const q = {
     WHERE p.correct IS NOT NULL AND (@sport = 'all' OR f.sport = @sport)
     ORDER BY f.kickoff DESC LIMIT 400`),
   // headline P&L stats (settled Claude picks only — honest record)
+  unsettledPast: db.prepare(`
+    SELECT f.id, f.sport, f.comp, f.home, f.away, f.kickoff,
+      (SELECT COUNT(*) FROM picks p WHERE p.fixture_id=f.id) npicks
+    FROM fixtures f
+    WHERE f.status='upcoming' AND f.kickoff IS NOT NULL
+      AND datetime(replace(f.kickoff,' ','T')) < datetime('now','-2 hours')
+    ORDER BY f.kickoff DESC LIMIT 100`),
   manualPending: db.prepare(`
     SELECT * FROM fixtures WHERE id LIKE 'manual:%' AND status='upcoming' AND kickoff IS NOT NULL`),
   claudeStats: db.prepare(`

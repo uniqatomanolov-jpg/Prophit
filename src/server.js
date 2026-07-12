@@ -1,8 +1,8 @@
 import "dotenv/config";
 import express from "express";
 import cron from "node-cron";
-import { q } from "./db.js";
-import { syncFixtures, generatePicks, gradeFinished } from "./jobs.js";
+import { q, db, markFinal, gradePick } from "./db.js";
+import { syncFixtures, generatePicks, gradeFinished, correctFromScore } from "./jobs.js";
 import { ingestEvents, ingestResults } from "./uploads.js";
 
 const app = express();
@@ -141,6 +141,28 @@ const requireAdmin = (req, res, next) => {
   next();
 };
 // POST the CSV text with Content-Type: text/csv
+// finished-but-unsettled games (for the manual settle panel)
+app.get("/api/unsettled", requireAdmin, (_, res) => res.json(q.unsettledPast.all()));
+
+// settle one game by typing the final score — grades every score-derivable pick
+app.post("/api/settle", requireAdmin, (req, res) => {
+  try {
+    const { id, hs, as } = req.body || {};
+    const H = Number(hs), A = Number(as);
+    if (!id || Number.isNaN(H) || Number.isNaN(A)) return res.status(400).json({ error: "need id, hs, as" });
+    const f = q.fixtureById ? q.fixtureById.get(id) : db.prepare("SELECT * FROM fixtures WHERE id=?").get(id);
+    if (!f) return res.status(404).json({ error: "fixture not found" });
+    markFinal.run({ id, score: `${H}-${A}` });
+    let graded = 0, skipped = 0;
+    for (const pk of q.picksFor.all(id)) {
+      const c = correctFromScore(pk.market, pk.pick, H, A, f.home, f.away);
+      if (c != null) { gradePick.run({ correct: c, fixture_id: id, model: pk.model, market: pk.market }); graded++; }
+      else skipped++;
+    }
+    res.json({ ok: true, score: `${H}-${A}`, graded, skipped });
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
 app.post("/api/upload/events", requireAdmin, (req, res) => {
   try { res.json(ingestEvents(req.body || "")); }
   catch (e) { res.status(400).json({ error: e.message }); }
