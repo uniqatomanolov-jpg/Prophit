@@ -11,7 +11,7 @@ app.use(express.text({ type: ["text/csv", "text/plain"], limit: "5mb" }));
 app.use((req, res, next) => {
   res.set("Access-Control-Allow-Origin", "*");
   res.set("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
-  res.set("Access-Control-Allow-Headers", "Content-Type");
+  res.set("Access-Control-Allow-Headers", "Content-Type, X-Admin-Key");
   if (req.method === "OPTIONS") return res.sendStatus(204);
   next();
 });
@@ -75,6 +75,51 @@ app.get("/api/picks", (req, res) => {
 
 app.get("/api/health", (_, res) => res.json({ ok: true }));
 
+// External-cron endpoint: wakes the server and runs the full cycle.
+// Point a free pinger (e.g. cron-job.org) at GET /api/cron every few hours.
+let cronBusy = false;
+app.get("/api/cron", async (_, res) => {
+  if (cronBusy) return res.json({ ok: true, running: true });
+  cronBusy = true;
+  res.json({ ok: true, started: true });   // reply immediately; work continues
+  try {
+    await syncFixtures();
+    await generatePicks();
+    await gradeFinished();
+    console.log("[cron] cycle complete");
+  } catch (e) { console.error("[cron]", e.message); }
+  finally { cronBusy = false; }
+});
+
+// Claude's real track record vs the bookies: headline stats, P&L curve, receipts.
+app.get("/api/track", (req, res) => {
+  const sport = req.query.sport || "all";
+  const s = q.claudeStats.get({ sport }) || {};
+  const history = q.claudeHistory.all({ sport });      // newest first
+  // build a running profit curve in chronological order
+  const chrono = history.slice().reverse();
+  let run = 0;
+  const curve = chrono.map((h) => {
+    run += h.correct ? (Number(h.price || 1.9) - 1) : -1;
+    return Math.round(run * 100) / 100;
+  });
+  res.json({
+    settled: s.total || 0,
+    wins: s.wins || 0,
+    losses: (s.total || 0) - (s.wins || 0),
+    accuracy: s.accuracy ?? null,
+    roi: s.roi ?? null,
+    profitUnits: s.profit ?? 0,          // profit in flat 1-unit stakes
+    avgEdge: s.avg_edge ?? null,
+    curve,                                // running units over time
+    receipts: history.map((h) => ({
+      sport: h.sport, event: `${h.home} v ${h.away}`, competition: h.comp,
+      kickoff: h.kickoff, score: h.score, market: h.market, pick: h.pick,
+      odds: h.price, edge: h.edge, result: h.correct ? "win" : "loss",
+    })),
+  });
+});
+
 // distinct markets present (for the per-market leaderboard selector)
 app.get("/api/markets", (req, res) => {
   res.json(q.distinctMarkets.all({ sport: req.query.sport || "all" }).map((r) => r.market));
@@ -89,13 +134,18 @@ app.get("/api/leaderboard/breakdown", (req, res) => {
   res.json(out);
 });
 
-// —— CSV upload: add your own events/odds/markets from a daily spreadsheet ——
+// —— CSV upload (admin-only when ADMIN_KEY is set in the environment) ——
+const requireAdmin = (req, res, next) => {
+  const key = process.env.ADMIN_KEY;
+  if (key && req.get("x-admin-key") !== key) return res.status(401).json({ error: "invalid admin key" });
+  next();
+};
 // POST the CSV text with Content-Type: text/csv
-app.post("/api/upload/events", (req, res) => {
+app.post("/api/upload/events", requireAdmin, (req, res) => {
   try { res.json(ingestEvents(req.body || "")); }
   catch (e) { res.status(400).json({ error: e.message }); }
 });
-app.post("/api/upload/results", (req, res) => {
+app.post("/api/upload/results", requireAdmin, (req, res) => {
   try { res.json(ingestResults(req.body || "")); }
   catch (e) { res.status(400).json({ error: e.message }); }
 });

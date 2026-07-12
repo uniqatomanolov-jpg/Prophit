@@ -43,7 +43,7 @@ for (const col of ["probability REAL", "edge REAL"]) {
 export const upsertFixture = db.prepare(`
   INSERT INTO fixtures (id, sport, comp, home, away, entrants, kickoff, status, score, raw)
   VALUES (@id, @sport, @comp, @home, @away, @entrants, @kickoff, @status, @score, @raw)
-  ON CONFLICT(id) DO UPDATE SET status=@status, score=@score, raw=@raw
+  ON CONFLICT(id) DO UPDATE SET status=@status, score=@score, raw=@raw, entrants=COALESCE(@entrants, entrants)
 `);
 
 export const upsertOdd = db.prepare(`
@@ -95,6 +95,23 @@ export const q = {
     FROM picks p JOIN fixtures f ON f.id = p.fixture_id
     WHERE p.correct IS NOT NULL AND (@sport = 'all' OR f.sport = @sport)
     ORDER BY f.kickoff DESC LIMIT 400`),
+  // headline P&L stats (settled Claude picks only — honest record)
+  claudeStats: db.prepare(`
+    SELECT COUNT(*) total,
+      SUM(p.correct) wins,
+      ROUND(SUM(CASE WHEN p.correct=1 THEN COALESCE(p.price,1.9)-1 ELSE -1 END), 2) profit,
+      ROUND(100.0*SUM(p.correct)/COUNT(*),1) accuracy,
+      ROUND(100.0*SUM(CASE WHEN p.correct=1 THEN COALESCE(p.price,1.9)-1 ELSE -1 END)/COUNT(*),1) roi,
+      ROUND(AVG(p.edge),1) avg_edge
+    FROM picks p JOIN fixtures f ON f.id=p.fixture_id
+    WHERE p.model='claude' AND p.correct IS NOT NULL AND (@sport='all' OR f.sport=@sport)`),
+  // settled bet history ("receipts") — most recent first, with running profit computed in JS
+  claudeHistory: db.prepare(`
+    SELECT f.sport, f.comp, f.home, f.away, f.kickoff, f.score,
+      p.market, p.pick, p.price, p.probability, p.edge, p.correct
+    FROM picks p JOIN fixtures f ON f.id=p.fixture_id
+    WHERE p.model='claude' AND p.correct IS NOT NULL AND (@sport='all' OR f.sport=@sport)
+    ORDER BY f.kickoff DESC LIMIT 200`),
   leaderboard: db.prepare(`
     SELECT p.model,
       COUNT(*) total,
