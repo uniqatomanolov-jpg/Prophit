@@ -15,14 +15,18 @@ const ODDS_FORMAT = "decimal";
 // which The Odds API sport keys feed each of our sport buckets (env-overridable).
 // More keys = more games (but more quota). Trim on the free tier.
 const SPORT_KEYS = {
-  soccer: (process.env.ODDS_SOCCER || "soccer_epl,soccer_spain_la_liga,soccer_italy_serie_a,soccer_germany_bundesliga,soccer_france_ligue_one,soccer_uefa_champs_league,soccer_usa_mls,soccer_brazil_campeonato").split(",").filter(Boolean),
+  soccer: (process.env.ODDS_SOCCER || "soccer_epl,soccer_uefa_champs_league,soccer_spain_la_liga,soccer_italy_serie_a,soccer_germany_bundesliga").split(",").filter(Boolean),
   tennis: (process.env.ODDS_TENNIS || "tennis_atp_wimbledon,tennis_wta_wimbledon,tennis_atp_canadian_open,tennis_wta_canadian_open").split(",").filter(Boolean),
   nba: (process.env.ODDS_BASKETBALL || "basketball_nba").split(",").filter(Boolean),
   nfl: (process.env.ODDS_NFL || "americanfootball_nfl").split(",").filter(Boolean),
+  mlb: (process.env.ODDS_MLB || "baseball_mlb").split(",").filter(Boolean),
+  nhl: (process.env.ODDS_NHL || "icehockey_nhl").split(",").filter(Boolean),
+  mma: (process.env.ODDS_MMA || "mma_mixed_martial_arts").split(",").filter(Boolean),
+  cricket: (process.env.ODDS_CRICKET || "cricket_t20,cricket_odi").split(",").filter(Boolean),
 };
 
 // markets we request per sport — ONLY what we grade, to save quota.
-const MARKETS = { soccer: "h2h,totals", tennis: "h2h", nba: "h2h", nfl: "h2h" };
+const MARKETS = { soccer: "h2h,totals", tennis: "h2h", nba: "h2h", nfl: "h2h", mlb: "h2h", nhl: "h2h", mma: "h2h", cricket: "h2h" };
 
 async function api(path, params = {}) {
   const url = new URL(BASE + path);
