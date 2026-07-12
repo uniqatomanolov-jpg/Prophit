@@ -15,7 +15,7 @@ const ODDS_FORMAT = "decimal";
 // which The Odds API sport keys feed each of our sport buckets (env-overridable).
 // More keys = more games (but more quota). Trim on the free tier.
 const SPORT_KEYS = {
-  soccer: (process.env.ODDS_SOCCER || "soccer_epl,soccer_uefa_champs_league,soccer_spain_la_liga,soccer_italy_serie_a,soccer_germany_bundesliga").split(",").filter(Boolean),
+  soccer: (process.env.ODDS_SOCCER || "soccer_fifa_world_cup,soccer_epl,soccer_uefa_champs_league,soccer_spain_la_liga,soccer_italy_serie_a,soccer_germany_bundesliga").split(",").filter(Boolean),
   tennis: (process.env.ODDS_TENNIS || "tennis_atp_wimbledon,tennis_wta_wimbledon,tennis_atp_canadian_open,tennis_wta_canadian_open").split(",").filter(Boolean),
   nba: (process.env.ODDS_BASKETBALL || "basketball_nba").split(",").filter(Boolean),
   nfl: (process.env.ODDS_NFL || "americanfootball_nfl").split(",").filter(Boolean),
