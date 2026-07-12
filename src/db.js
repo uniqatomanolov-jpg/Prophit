@@ -76,7 +76,7 @@ export const q = {
   hasPicks: db.prepare(`SELECT COUNT(*) n FROM picks WHERE fixture_id=? AND model=?`),
   distinctMarkets: db.prepare(`
     SELECT DISTINCT p.market FROM picks p JOIN fixtures f ON f.id = p.fixture_id
-    WHERE (@sport = 'all' OR f.sport = @sport) ORDER BY p.market`),
+    WHERE p.correct IS NOT NULL AND (@sport = 'all' OR f.sport = @sport) ORDER BY p.market`),
   picksList: db.prepare(`
     SELECT p.fixture_id, f.sport, f.comp, f.home, f.away, f.kickoff, f.status, f.score,
            p.model, p.market, p.pick, p.confidence, p.price, p.reasoning, p.created_at,

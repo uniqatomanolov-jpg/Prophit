@@ -148,7 +148,7 @@ function normSpreadex(rows) {
   const kickoff = `${today()} 20:00`;
   const NAME = { "match result": "x12", "both teams to score": "btts", "double chance": "dc",
     "draw no bet": "dnb", "half time result": "htr", "first team to score": "fts",
-    "to qualify": "qualify", "goalscorer markets": "ags" };
+    "to qualify": "qualify", "goalscorer markets": "ags", "correct score": "cs", "asian handicap": "ah", "handicap": "ah" };
   const out = [];
   for (const r of rows) {
     const name = (r[0] || "").trim();
@@ -178,7 +178,7 @@ function normBetanoMatch(rows) {
   if (!home || !away) return null;
   const NAME = { "match result": "x12", "both teams to score": "btts", "double chance": "dc",
     "draw no bet": "dnb", "half time result": "htr", "to qualify": "qualify",
-    "over/under total goals": "goals_ou", "goalscorer markets": "ags", "anytime goalscorer": "ags" };
+    "over/under total goals": "goals_ou", "goalscorer markets": "ags", "anytime goalscorer": "ags", "correct score": "cs", "asian handicap": "ah", "handicap": "ah" };
   const kickoff = `${today()} 20:00`;
   const out = [];
   for (const r of rows.slice(1)) {
@@ -200,9 +200,49 @@ function normBetanoMatch(rows) {
 
 const RACE_SPORTS = new Set(["f1", "motogp", "nascar", "golf", "cycling"]);
 
+
+const WD = { sun:0, mon:1, tue:2, wed:3, thu:4, fri:5, sat:6 };
+function whenToKickoff(when) {
+  const parts = String(when || "").split(",").map((x) => x.trim());
+  const day = (parts[0] || "").toLowerCase(); const time = parts[1] || parts[0] || "00:00";
+  const now = new Date(); let d = new Date(now);
+  if (day.startsWith("tomorrow")) d.setDate(d.getDate() + 1);
+  else if (WD[day.slice(0, 3)] != null) {
+    const ahead = (WD[day.slice(0, 3)] - now.getDay() + 7) % 7 || 7;
+    d.setDate(d.getDate() + ahead);
+  } else if (!day.startsWith("today")) { /* unknown → today */ }
+  const iso = d.toISOString().slice(0, 10);
+  // if today's time already passed, roll to tomorrow (upcoming lists only)
+  if (iso === now.toISOString().slice(0, 10)) return dateFrom(null, time);
+  return `${iso} ${time}`;
+}
+function normSpreadexList(rows) {
+  if (rows.length < 2) return null;
+  const head = rows[0].map((c) => String(c).toLowerCase());
+  const looks = head.some((c) => c.includes("min-w-0")) || head.some((c) => c.includes("truncate"));
+  if (!looks) return null;
+  const out = [];
+  for (const r of rows.slice(1)) {
+    const comp = (r[0] || "").trim(), match = (r[1] || "").trim();
+    const o1 = num(r[2]), o2 = num(r[3]);
+    if (!match.includes(" v ") || o1 == null || o2 == null) continue;
+    if (/outright/i.test(match)) continue;
+    const [home, away] = match.split(" v ").map((x) => x.trim());
+    const sport = /atp|wta|wimbledon|challenger|us open|roland|australian/i.test(comp) ? "tennis" : null;
+    if (!sport) continue;
+    const kickoff = whenToKickoff(r[4]);
+    out.push({ sport, kickoff, competition: comp, home, away, market: "ml", option: home, odds: o1 });
+    out.push({ sport, kickoff, competition: comp, home, away, market: "ml", option: away, odds: o2 });
+  }
+  return out.length ? out : null;
+}
+
 export function ingestEvents(csvText) {
   const raw = splitRows(csvText);
-  let rows = normBG(raw) || normSpreadex(raw) || normBetanoMatch(raw) || normEN(raw);
+  let rows = normBG(raw) || normSpreadexList(raw) || normSpreadex(raw) || normBetanoMatch(raw) || normEN(raw);
+  // scraped soccer files: keep only the big-turnover markets (rest is noise)
+  const KEEP_SOCCER = new Set(["x12", "goals_ou", "ou25", "btts", "cs", "ah"]);
+  if (rows) rows = rows.filter((r) => String(r.sport).toLowerCase() !== "soccer" || KEEP_SOCCER.has(r.market));
   if (!rows) rows = parseCSV(csvText);
   const seen = new Set(); let fixtures = 0, odds = 0;
   // pre-pass: collect entrants for race events (drivers/riders = the options)
