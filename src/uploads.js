@@ -445,7 +445,7 @@ export function ingestEvents(csvText) {
   const raw = splitRows(csvText);
   let rows = normWebScraperMarkets(raw) || normWebScraperBasket(raw) || normWebScraperPlayers(raw) || normWebScraper(raw) || normBG(raw) || normSpreadexList(raw) || normSpreadex(raw) || normBetanoMatch(raw) || normSimplePlayers(raw) || normEN(raw);
   // scraped soccer files: keep only the big-turnover markets (rest is noise)
-  const KEEP_SOCCER = new Set(["x12", "goals_ou", "ou25", "btts", "cs", "ah", "corners_ou", "cards_ou", "htr", "dc", "dnb"]);
+  const KEEP_SOCCER = new Set(["x12", "goals_ou", "ou25", "goals_ou_1h", "btts", "dc", "corners_3way", "corners_ou"]);
   if (rows) rows = rows.filter((r) => String(r.sport).toLowerCase() !== "soccer" || KEEP_SOCCER.has(r.market));
   if (!rows) rows = parseCSV(csvText);
   const seen = new Set(); let fixtures = 0, odds = 0;
