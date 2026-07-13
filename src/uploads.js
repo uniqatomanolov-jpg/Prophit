@@ -298,8 +298,9 @@ function slugTeams(url){
 }
 function marketIdFromTitle(t){
   var x=String(t).toLowerCase();
-  if(/corner/.test(x)){if(/team total/.test(x))return "corners_team";if(/handicap/.test(x))return "corners_ah";if(/total/.test(x))return "corners_ou";return "corners";}
-  if(/card|booking/.test(x)){if(/total/.test(x))return "cards_ou";return "cards";}
+  if(/team total/.test(x))return null;                               // team totals = noise, drop
+  if(/corner/.test(x)){return /total/.test(x)?"corners_ou":null;}     // match Over/Under corners only
+  if(/card|booking/.test(x)){return /total/.test(x)?"cards_ou":null;} // match Over/Under cards only
   if(/money\s*line|match result|1x2|full time result/.test(x))return "x12";
   if(/to qualify/.test(x))return "qualify";
   if(/both teams|btts/.test(x))return "btts";
@@ -393,8 +394,10 @@ function normWebScraperMarkets(rows){
     pairs.forEach(function(pr){
       var label=(r[pr[0]]||"").trim(); var price=num(r[pr[1]]);
       if(!label||price==null)return;
-      var opt=label.replace(/\s*\((corners|cards|bookings|shots)\)\s*/ig," ").trim();
+      var opt=label.replace(/\s*\((corners|cards|bookings|shots)\)\s*/ig," ").replace(/\b(corners|cards|bookings|shots)\b/ig,"").replace(/\s+/g," ").trim();
       if(market==="x12"){var L=opt.toLowerCase();opt=(L===teams.home.toLowerCase())?"home":(L==="draw")?"draw":(L===teams.away.toLowerCase())?"away":opt;}
+      else if(/_ou$/.test(market)){var mo=opt.match(/(over|under)\s*([\d.]+)/i);if(mo)opt=mo[1].charAt(0).toUpperCase()+mo[1].slice(1).toLowerCase()+" "+mo[2];}
+      if(market==="ah" && /^[+-]?\d+(\.\d+)?$/.test(opt)) return;   // skip bare handicap-line labels
       out.push({sport:sport,kickoff:base.kickoff,competition:comp,home:base.home,away:base.away,market:market,option:opt,odds:price});
     });
   }
@@ -442,7 +445,7 @@ export function ingestEvents(csvText) {
   const raw = splitRows(csvText);
   let rows = normWebScraperMarkets(raw) || normWebScraperBasket(raw) || normWebScraperPlayers(raw) || normWebScraper(raw) || normBG(raw) || normSpreadexList(raw) || normSpreadex(raw) || normBetanoMatch(raw) || normSimplePlayers(raw) || normEN(raw);
   // scraped soccer files: keep only the big-turnover markets (rest is noise)
-  const KEEP_SOCCER = new Set(["x12", "goals_ou", "ou25", "btts", "cs", "ah", "corners_ou", "corners", "cards_ou", "cards", "team_total", "htr", "dc", "dnb"]);
+  const KEEP_SOCCER = new Set(["x12", "goals_ou", "ou25", "btts", "cs", "ah", "corners_ou", "cards_ou", "htr", "dc", "dnb"]);
   if (rows) rows = rows.filter((r) => String(r.sport).toLowerCase() !== "soccer" || KEEP_SOCCER.has(r.market));
   if (!rows) rows = parseCSV(csvText);
   const seen = new Set(); let fixtures = 0, odds = 0;
