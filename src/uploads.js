@@ -277,6 +277,34 @@ function marketIdFromTitle(t){
   if(/half/.test(x))return "htr";
   return slug(x).toLowerCase();
 }
+function normWebScraperBasket(rows){
+  // webscraper.io basketball/matchups: data2(home),data3(away),data4/5(spread lines),data6(time),price3/4(spread odds)
+  if(rows.length<2)return null;
+  var head=rows[0].map(function(c){return String(c).toLowerCase();});
+  if(!head.some(function(c){return c.indexOf("web_scraper")>=0;}))return null;
+  if(head.indexOf("data2")<0||head.indexOf("data3")<0||head.indexOf("price3")<0)return null;
+  var iUrl=head.findIndex(function(c){return c.indexOf("start_url")>=0;});
+  var iH=head.indexOf("data2"),iA=head.indexOf("data3"),iHL=head.indexOf("data4"),iAL=head.indexOf("data5"),iTime=head.indexOf("data6");
+  var iHP=head.indexOf("price3"),iAP=head.indexOf("price4");
+  var sm=(rows[1][iUrl]||"").match(/pinnacle\.com\/en\/([a-z-]+)\//i)||(rows[1][iUrl]||"").match(/\/en\/([a-z-]+)\//i);
+  var SPORT_MAP={basketball:"nba","ice-hockey":"nhl",baseball:"mlb",handball:"handball",volleyball:"volleyball"};
+  var sport=sm?(SPORT_MAP[sm[1].toLowerCase()]||sm[1].toLowerCase()):null;
+  if(!sport)return null;
+  var out=[];
+  for(var i=1;i<rows.length;i++){
+    var r=rows[i]; var home=(r[iH]||"").trim(), away=(r[iA]||"").trim();
+    if(!home||!away)continue;
+    var rawTime=(r[iTime]||"").replace(/\+\d+$/,"").trim();   // strip "+3" tz suffix
+    var kickoff=whenToKickoff(rawTime);
+    var base={sport:sport,kickoff:kickoff,competition:sport==="nba"?"Basketball":sport.charAt(0).toUpperCase()+sport.slice(1),home:home,away:away};
+    var hp=num(r[iHP]), ap=num(r[iAP]);
+    var hl=(r[iHL]||"").trim(), al=(r[iAL]||"").trim();
+    if(hp!=null)out.push({sport:sport,kickoff:kickoff,competition:base.competition,home:home,away:away,market:"spread",option:home+" "+hl,line:hl,odds:hp});
+    if(ap!=null)out.push({sport:sport,kickoff:kickoff,competition:base.competition,home:home,away:away,market:"spread",option:away+" "+al,line:al,odds:ap});
+  }
+  return out.length?out:null;
+}
+
 function normWebScraperPlayers(rows){
   // webscraper.io variant: data(p1),data2(p2),data3(time),price,price2 ; sport from URL, no title/name cols
   if(rows.length<2)return null;
@@ -379,7 +407,7 @@ function normWebScraper(rows) {
 
 export function ingestEvents(csvText) {
   const raw = splitRows(csvText);
-  let rows = normWebScraperMarkets(raw) || normWebScraperPlayers(raw) || normWebScraper(raw) || normBG(raw) || normSpreadexList(raw) || normSpreadex(raw) || normBetanoMatch(raw) || normEN(raw);
+  let rows = normWebScraperMarkets(raw) || normWebScraperBasket(raw) || normWebScraperPlayers(raw) || normWebScraper(raw) || normBG(raw) || normSpreadexList(raw) || normSpreadex(raw) || normBetanoMatch(raw) || normEN(raw);
   // scraped soccer files: keep only the big-turnover markets (rest is noise)
   const KEEP_SOCCER = new Set(["x12", "goals_ou", "ou25", "btts", "cs", "ah", "corners_ou", "corners", "cards_ou", "cards", "team_total", "htr", "dc", "dnb"]);
   if (rows) rows = rows.filter((r) => String(r.sport).toLowerCase() !== "soccer" || KEEP_SOCCER.has(r.market));
