@@ -257,6 +257,57 @@ function normSpreadexList(rows) {
 // —— Web Scraper (webscraper.io) Betano export ——
 // headers: web_scraper_order,web_scraper_start_url,data(home),data2(away),data3(o1),data4(o2),data5(time),name,name2,data6(DD/MM)
 // sport + competition come straight from the start URL (…/sport/darts/pdc/world-matchplay/…)
+function slugTeams(url){
+  var m=String(url).match(/\/([a-z0-9-]+)-vs-([a-z0-9-]+)(?:[\/#]|$)/i);
+  if(!m)return null;
+  var tidy=function(x){return x.replace(/-/g," ").replace(/\b\w/g,function(c){return c.toUpperCase();}).trim();};
+  return {home:tidy(m[1]),away:tidy(m[2])};
+}
+function marketIdFromTitle(t){
+  var x=String(t).toLowerCase();
+  if(/corner|card|booking/.test(x))return null;          // dropped by soccer whitelist anyway
+  if(/money\s*line|match result|1x2|full time result/.test(x))return "x12";
+  if(/to qualify/.test(x))return "qualify";
+  if(/both teams|btts/.test(x))return "btts";
+  if(/correct score/.test(x))return "cs";
+  if(/team total/.test(x))return "team_total";
+  if(/total/.test(x))return "goals_ou";
+  if(/handicap|spread|asian/.test(x))return "ah";
+  if(/half/.test(x))return "htr";
+  return slug(x).toLowerCase();
+}
+function normWebScraperMarkets(rows){
+  if(rows.length<2)return null;
+  var head=rows[0].map(function(c){return String(c).toLowerCase();});
+  if(!head.some(function(c){return c.indexOf("web_scraper")>=0;}))return null;
+  if(head.indexOf("title")<0||head.indexOf("price")<0||head.indexOf("name")<0)return null;
+  var iUrl=head.findIndex(function(c){return c.indexOf("start_url")>=0;});
+  var iT=head.indexOf("title"),iP=head.indexOf("price"),iP2=head.indexOf("price2");
+  var iN=head.indexOf("name"),iN2=head.indexOf("name2");
+  var SPORT_MAP={darts:"darts",snooker:"snooker",tennis:"tennis","table-tennis":"tabletennis",volleyball:"volleyball",basketball:"nba",football:"soccer",soccer:"soccer","ice-hockey":"nhl",hockey:"nhl",handball:"handball",baseball:"mlb",boxing:"boxing",mma:"mma",esports:"esports","e-sports":"esports",cricket:"cricket"};
+  var out=[];
+  for(var i=1;i<rows.length;i++){
+    var r=rows[i]; var url=r[iUrl]||"";
+    var sm=url.match(/\/(?:en\/)?([a-z-]+)\//i);
+    var sport=sm?(SPORT_MAP[sm[1].toLowerCase()]||null):null;
+    var teams=slugTeams(url);
+    if(!sport||!teams)continue;
+    var compM=url.match(new RegExp("/"+(sm?sm[1]:"")+"/([a-z0-9-]+)/","i"));
+    var comp=compM?compM[1].replace(/-/g," ").replace(/\b\w/g,function(c){return c.toUpperCase();}):"";
+    var market=marketIdFromTitle(r[iT]); if(!market)continue;
+    var base={sport:sport,kickoff:`${today()} 20:00`,competition:comp,home:teams.home,away:teams.away};
+    var pairs=[[iN,iP],[iN2,iP2]];
+    pairs.forEach(function(pr){
+      var label=(r[pr[0]]||"").trim(); var price=num(r[pr[1]]);
+      if(!label||price==null)return;
+      var opt=label;
+      if(market==="x12"){var L=label.toLowerCase();opt=(L===teams.home.toLowerCase())?"home":(L==="draw")?"draw":(L===teams.away.toLowerCase())?"away":label;}
+      out.push({sport:sport,kickoff:base.kickoff,competition:comp,home:base.home,away:base.away,market:market,option:opt,odds:price});
+    });
+  }
+  return out.length?out:null;
+}
+
 function normWebScraper(rows) {
   if (rows.length < 2) return null;
   const head = rows[0].map((c) => String(c).toLowerCase());
@@ -296,7 +347,7 @@ function normWebScraper(rows) {
 
 export function ingestEvents(csvText) {
   const raw = splitRows(csvText);
-  let rows = normWebScraper(raw) || normBG(raw) || normSpreadexList(raw) || normSpreadex(raw) || normBetanoMatch(raw) || normEN(raw);
+  let rows = normWebScraperMarkets(raw) || normWebScraper(raw) || normBG(raw) || normSpreadexList(raw) || normSpreadex(raw) || normBetanoMatch(raw) || normEN(raw);
   // scraped soccer files: keep only the big-turnover markets (rest is noise)
   const KEEP_SOCCER = new Set(["x12", "goals_ou", "ou25", "btts", "cs", "ah"]);
   if (rows) rows = rows.filter((r) => String(r.sport).toLowerCase() !== "soccer" || KEEP_SOCCER.has(r.market));
