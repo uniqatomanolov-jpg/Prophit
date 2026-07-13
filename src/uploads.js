@@ -31,7 +31,7 @@ export function parseCSV(text) {
 }
 
 const slug = (s) => String(s).trim().replace(/[^\p{L}\p{N}.-]+/gu, "-").replace(/-+/g, "-").replace(/^-|-$/g, "");
-export const manualId = (r) => `manual:${slug(r.sport)}:${slug(r.kickoff)}:${slug(r.home)}_v_${slug(r.away)}`;
+export const manualId = (r) => `manual:${slug(r.sport)}:${slug(r.home)}_v_${slug(r.away)}`;
 
 const MONTHS = { jan:1,feb:2,mar:3,apr:4,may:5,jun:6,jul:7,aug:8,sep:9,oct:10,nov:11,dec:12 };
 const YEAR = new Date().getFullYear();

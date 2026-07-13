@@ -43,7 +43,7 @@ for (const col of ["probability REAL", "edge REAL"]) {
 export const upsertFixture = db.prepare(`
   INSERT INTO fixtures (id, sport, comp, home, away, entrants, kickoff, status, score, raw)
   VALUES (@id, @sport, @comp, @home, @away, @entrants, @kickoff, @status, @score, @raw)
-  ON CONFLICT(id) DO UPDATE SET status=@status, score=@score, raw=@raw, entrants=COALESCE(@entrants, entrants)
+  ON CONFLICT(id) DO UPDATE SET status=@status, score=@score, raw=@raw, entrants=COALESCE(@entrants, entrants), kickoff=COALESCE(@kickoff, kickoff), comp=@comp
 `);
 
 export const upsertOdd = db.prepare(`
