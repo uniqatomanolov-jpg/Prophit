@@ -253,9 +253,50 @@ function normSpreadexList(rows) {
   return out.length ? out : null;
 }
 
+
+// —— Web Scraper (webscraper.io) Betano export ——
+// headers: web_scraper_order,web_scraper_start_url,data(home),data2(away),data3(o1),data4(o2),data5(time),name,name2,data6(DD/MM)
+// sport + competition come straight from the start URL (…/sport/darts/pdc/world-matchplay/…)
+function normWebScraper(rows) {
+  if (rows.length < 2) return null;
+  const head = rows[0].map((c) => String(c).toLowerCase());
+  if (!head.includes("web_scraper_order") && !head.some((c) => c.includes("web_scraper"))) return null;
+  const iUrl = head.findIndex((c) => c.includes("start_url"));
+  // locate the two odds columns = first two numeric-looking columns after the url
+  const SPORT_MAP = { darts: "darts", snooker: "snooker", tennis: "tennis", "table-tennis": "tabletennis",
+    volleyball: "volleyball", basketball: "nba", football: "soccer", soccer: "soccer", "ice-hockey": "nhl",
+    handball: "handball", baseball: "mlb", boxing: "boxing", mma: "mma", "esports": "esports", "e-sports": "esports" };
+  const out = [];
+  for (const r of rows.slice(1)) {
+    const url = r[iUrl] || "";
+    const m = url.match(/\/sport\/([a-z-]+)\/([a-z0-9-]+)(?:\/([a-z0-9-]+))?/i);
+    const sport = m ? (SPORT_MAP[m[1].toLowerCase()] || m[1].toLowerCase()) : null;
+    if (!sport) continue;
+    var compRaw = m ? (m[3] && !/^\d+$/.test(m[3]) ? m[3] : m[2]) : "";
+    const comp = compRaw ? compRaw.replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase()) : "Betano";
+    // find home/away (first two non-url, non-numeric text cells) and their two odds
+    const cells = r.slice(0, iUrl).concat(r.slice(iUrl + 1));
+    const texts = [], nums = [];
+    for (const c of cells) {
+      const v = String(c).trim(); if (!v) continue;
+      if (/^\d{1,3}([.,]\d+)?$/.test(v) && parseFloat(v) >= 1.01 && parseFloat(v) <= 200) nums.push(parseFloat(v.replace(",", ".")));
+      else if (!/^https?:/i.test(v) && !/^\d+$/.test(v) && !/^\d{1,2}[:\/]\d/.test(v)) texts.push(v);
+    }
+    const home = r[2] || texts[0], away = r[3] || texts[1];
+    const o1 = num(r[4]) ?? nums[0], o2 = num(r[5]) ?? nums[1];
+    const time = r[6] || "";
+    const dstr = r[9] || "";
+    if (!home || !away || o1 == null || o2 == null) continue;
+    const kickoff = /\d{1,2}\/\d{1,2}/.test(dstr) ? dateFrom(dstr, time) : whenToKickoff(time);
+    out.push({ sport, kickoff, competition: comp, home, away, market: "ml", option: home, odds: o1 });
+    out.push({ sport, kickoff, competition: comp, home, away, market: "ml", option: away, odds: o2 });
+  }
+  return out.length ? out : null;
+}
+
 export function ingestEvents(csvText) {
   const raw = splitRows(csvText);
-  let rows = normBG(raw) || normSpreadexList(raw) || normSpreadex(raw) || normBetanoMatch(raw) || normEN(raw);
+  let rows = normWebScraper(raw) || normBG(raw) || normSpreadexList(raw) || normSpreadex(raw) || normBetanoMatch(raw) || normEN(raw);
   // scraped soccer files: keep only the big-turnover markets (rest is noise)
   const KEEP_SOCCER = new Set(["x12", "goals_ou", "ou25", "btts", "cs", "ah"]);
   if (rows) rows = rows.filter((r) => String(r.sport).toLowerCase() !== "soccer" || KEEP_SOCCER.has(r.market));
