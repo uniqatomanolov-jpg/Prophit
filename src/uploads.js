@@ -36,6 +36,11 @@ export const manualId = (r) => `manual:${slug(r.sport)}:${slug(r.kickoff)}:${slu
 const MONTHS = { jan:1,feb:2,mar:3,apr:4,may:5,jun:6,jul:7,aug:8,sep:9,oct:10,nov:11,dec:12 };
 const YEAR = new Date().getFullYear();
 const today = () => new Date().toISOString().slice(0, 10);
+const futureSlot = () => {                       // 20:00 today, or tomorrow if that already passed
+  const now = new Date(); const t = new Date(now.toISOString().slice(0,10)+"T20:00:00");
+  if (t.getTime() < now.getTime() + 30*60e3) { const d = new Date(now.getTime()+24*3600e3); return d.toISOString().slice(0,10)+" 20:00"; }
+  return now.toISOString().slice(0,10)+" 20:00";
+};
 const pad = (n) => String(n).padStart(2, "0");
 function dateFrom(dstr, tstr) {
   const t = (tstr || "").trim() || "00:00";
@@ -145,7 +150,7 @@ function normSpreadex(rows) {
   if (!mr) return null;
   const home = mr[2], away = mr[6] || mr[4];
   if (!home || !away) return null;
-  const kickoff = `${today()} 20:00`;
+  const kickoff = futureSlot();
   const NAME = { "match result": "x12", "both teams to score": "btts", "double chance": "dc",
     "draw no bet": "dnb", "half time result": "htr", "first team to score": "fts",
     "to qualify": "qualify", "goalscorer markets": "ags", "correct score": "cs", "asian handicap": "ah", "handicap": "ah" };
@@ -179,7 +184,7 @@ function normBetanoMatch(rows) {
   const NAME = { "match result": "x12", "both teams to score": "btts", "double chance": "dc",
     "draw no bet": "dnb", "half time result": "htr", "to qualify": "qualify",
     "over/under total goals": "goals_ou", "goalscorer markets": "ags", "anytime goalscorer": "ags", "correct score": "cs", "asian handicap": "ah", "handicap": "ah" };
-  const kickoff = `${today()} 20:00`;
+  const kickoff = futureSlot();
   const out = [];
   for (const r of rows.slice(1)) {
     const name = (r[0] || "").trim(); if (!name) continue;
@@ -216,17 +221,45 @@ function whenToKickoff(when) {
   if (iso === now.toISOString().slice(0, 10)) return dateFrom(null, time);
   return `${iso} ${time}`;
 }
+function normSimplePlayers(rows, defSport){
+  if(rows.length<2)return null;
+  var head=rows[0].map(function(c){return String(c).toLowerCase().trim();});
+  var iP1=head.findIndex(function(c){return /player ?1|home|p1/.test(c);});
+  var iP2=head.findIndex(function(c){return /player ?2|away|p2/.test(c);});
+  var iO1=head.findIndex(function(c){return /odds ?1|price ?1|o1/.test(c);});
+  var iO2=head.findIndex(function(c){return /odds ?2|price ?2|o2/.test(c);});
+  if(iP1<0||iP2<0||iO1<0||iO2<0)return null;
+  var iSport=head.findIndex(function(c){return c==="sport";});
+  var iComp=head.findIndex(function(c){return /competition|league|event|tournament/.test(c);});
+  var iTime=head.findIndex(function(c){return /time|kickoff|date|start/.test(c);});
+  var out=[];
+  for(var i=1;i<rows.length;i++){
+    var r=rows[i]; var h=(r[iP1]||"").trim(), a=(r[iP2]||"").trim();
+    var o1=num(r[iO1]), o2=num(r[iO2]);
+    if(!h||!a||o1==null||o2==null)continue;
+    var sport=(iSport>=0&&r[iSport])?String(r[iSport]).toLowerCase().trim():(defSport||"darts");
+    var comp=(iComp>=0&&r[iComp])?r[iComp]:(sport.charAt(0).toUpperCase()+sport.slice(1));
+    var kickoff=(iTime>=0&&r[iTime])?whenToKickoff(r[iTime]):futureSlot();
+    out.push({sport:sport,kickoff:kickoff,competition:comp,home:h,away:a,market:"ml",option:h,odds:o1});
+    out.push({sport:sport,kickoff:kickoff,competition:comp,home:h,away:a,market:"ml",option:a,odds:o2});
+  }
+  return out.length?out:null;
+}
+
 function normSpreadexList(rows) {
   if (rows.length < 2) return null;
   const head = rows[0].map((c) => String(c).toLowerCase());
   const looks = head.some((c) => c.includes("min-w-0")) || head.some((c) => c.includes("truncate"));
   if (!looks) return null;
   const out = [];
+  // odds may sit in cols 2/3 OR 4/5 depending on the export; auto-pick the numeric pair
   for (const r of rows.slice(1)) {
-    const comp = (r[0] || "").trim(), match = (r[1] || "").trim();
-    const o1 = num(r[2]), o2 = num(r[3]);
-    if (!match.includes(" v ") || o1 == null || o2 == null) continue;
-    if (/outright/i.test(match)) continue;
+    const match = (r[0] || "").trim();
+    if (!match.includes(" v ") || /outright/i.test(match)) continue;
+    let o1 = num(r[2]), o2 = num(r[3]);
+    if (o1 == null || o2 == null) { o1 = num(r[4]); o2 = num(r[5]); }
+    if (o1 == null || o2 == null) continue;
+    const comp = "";
     const [home, away] = match.split(" v ").map((x) => x.trim());
     const SPORT_HINTS = [
       [/atp|wta|wimbledon|challenger|us open|roland|australian/i, "tennis"],
@@ -244,9 +277,9 @@ function normSpreadexList(rows) {
       [/handball/i, "handball"],
     ];
     let sport = null;
-    for (const [rx, sp] of SPORT_HINTS) { if (rx.test(comp)) { sport = sp; break; } }
+    var hint = comp + " " + match; for (const [rx, sp] of SPORT_HINTS) { if (rx.test(hint)) { sport = sp; break; } }
     if (!sport) continue;
-    const kickoff = whenToKickoff(r[4]);
+    const kickoff = whenToKickoff(r[1]);
     out.push({ sport, kickoff, competition: comp, home, away, market: "ml", option: home, odds: o1 });
     out.push({ sport, kickoff, competition: comp, home, away, market: "ml", option: away, odds: o2 });
   }
@@ -355,13 +388,13 @@ function normWebScraperMarkets(rows){
     var compM=url.match(new RegExp("/"+(sm?sm[1]:"")+"/([a-z0-9-]+)/","i"));
     var comp=compM?compM[1].replace(/-/g," ").replace(/\b\w/g,function(c){return c.toUpperCase();}):"";
     var market=marketIdFromTitle(r[iT]); if(!market)continue;
-    var base={sport:sport,kickoff:`${today()} 20:00`,competition:comp,home:teams.home,away:teams.away};
+    var base={sport:sport,kickoff:futureSlot(),competition:comp,home:teams.home,away:teams.away};
     var pairs=[[iN,iP],[iN2,iP2]];
     pairs.forEach(function(pr){
       var label=(r[pr[0]]||"").trim(); var price=num(r[pr[1]]);
       if(!label||price==null)return;
-      var opt=label;
-      if(market==="x12"){var L=label.toLowerCase();opt=(L===teams.home.toLowerCase())?"home":(L==="draw")?"draw":(L===teams.away.toLowerCase())?"away":label;}
+      var opt=label.replace(/\s*\((corners|cards|bookings|shots)\)\s*/ig," ").trim();
+      if(market==="x12"){var L=opt.toLowerCase();opt=(L===teams.home.toLowerCase())?"home":(L==="draw")?"draw":(L===teams.away.toLowerCase())?"away":opt;}
       out.push({sport:sport,kickoff:base.kickoff,competition:comp,home:base.home,away:base.away,market:market,option:opt,odds:price});
     });
   }
@@ -407,7 +440,7 @@ function normWebScraper(rows) {
 
 export function ingestEvents(csvText) {
   const raw = splitRows(csvText);
-  let rows = normWebScraperMarkets(raw) || normWebScraperBasket(raw) || normWebScraperPlayers(raw) || normWebScraper(raw) || normBG(raw) || normSpreadexList(raw) || normSpreadex(raw) || normBetanoMatch(raw) || normEN(raw);
+  let rows = normWebScraperMarkets(raw) || normWebScraperBasket(raw) || normWebScraperPlayers(raw) || normWebScraper(raw) || normBG(raw) || normSpreadexList(raw) || normSpreadex(raw) || normBetanoMatch(raw) || normSimplePlayers(raw) || normEN(raw);
   // scraped soccer files: keep only the big-turnover markets (rest is noise)
   const KEEP_SOCCER = new Set(["x12", "goals_ou", "ou25", "btts", "cs", "ah", "corners_ou", "corners", "cards_ou", "cards", "team_total", "htr", "dc", "dnb"]);
   if (rows) rows = rows.filter((r) => String(r.sport).toLowerCase() !== "soccer" || KEEP_SOCCER.has(r.market));
