@@ -265,7 +265,8 @@ function slugTeams(url){
 }
 function marketIdFromTitle(t){
   var x=String(t).toLowerCase();
-  if(/corner|card|booking/.test(x))return null;          // dropped by soccer whitelist anyway
+  if(/corner/.test(x)){if(/team total/.test(x))return "corners_team";if(/handicap/.test(x))return "corners_ah";if(/total/.test(x))return "corners_ou";return "corners";}
+  if(/card|booking/.test(x)){if(/total/.test(x))return "cards_ou";return "cards";}
   if(/money\s*line|match result|1x2|full time result/.test(x))return "x12";
   if(/to qualify/.test(x))return "qualify";
   if(/both teams|btts/.test(x))return "btts";
@@ -276,6 +277,37 @@ function marketIdFromTitle(t){
   if(/half/.test(x))return "htr";
   return slug(x).toLowerCase();
 }
+function normWebScraperPlayers(rows){
+  // webscraper.io variant: data(p1),data2(p2),data3(time),price,price2 ; sport from URL, no title/name cols
+  if(rows.length<2)return null;
+  var head=rows[0].map(function(c){return String(c).toLowerCase();});
+  if(!head.some(function(c){return c.indexOf("web_scraper")>=0;}))return null;
+  if(head.indexOf("title")>=0||head.indexOf("name")>=0)return null;      // handled by other detectors
+  var iUrl=head.findIndex(function(c){return c.indexOf("start_url")>=0;});
+  var iA=head.indexOf("data"),iB=head.indexOf("data2"),iT=head.indexOf("data3"),iP=head.indexOf("price"),iP2=head.indexOf("price2");
+  if(iA<0||iB<0||iP<0)return null;
+  var SPORT_MAP={darts:"darts",snooker:"snooker",tennis:"tennis","table-tennis":"tabletennis",volleyball:"volleyball",basketball:"nba",football:"soccer",soccer:"soccer","ice-hockey":"nhl",hockey:"nhl",handball:"handball",baseball:"mlb",boxing:"boxing",mma:"mma",cricket:"cricket"};
+  var clean=function(x){return String(x).replace(/\s*\((sets|games|maps|frames|legs|match)\)\s*/ig,"").trim();};
+  var out=[];
+  for(var i=1;i<rows.length;i++){
+    var r=rows[i]; var url=r[iUrl]||"";
+    var sm=url.match(/\/(?:en\/)?([a-z-]+)(?:\/|$)/i);
+    var sport=sm?(SPORT_MAP[sm[1].toLowerCase()]||null):null;
+    if(!sport)continue;
+    var raw1=String(r[iA]||""), raw2=String(r[iB]||"");
+    // skip the secondary "(Games)"-type lines (no primary winner price / duplicate)
+    if(/\((games|maps|frames|legs)\)/i.test(raw1))continue;
+    var home=clean(raw1), away=clean(raw2);
+    var o1=num(r[iP]), o2=num(r[iP2]);
+    if(!home||!away||o1==null||o2==null)continue;
+    var comp=sport.charAt(0).toUpperCase()+sport.slice(1);
+    var kickoff=whenToKickoff(r[iT]||"");
+    out.push({sport:sport,kickoff:kickoff,competition:comp,home:home,away:away,market:"ml",option:home,odds:o1});
+    out.push({sport:sport,kickoff:kickoff,competition:comp,home:home,away:away,market:"ml",option:away,odds:o2});
+  }
+  return out.length?out:null;
+}
+
 function normWebScraperMarkets(rows){
   if(rows.length<2)return null;
   var head=rows[0].map(function(c){return String(c).toLowerCase();});
@@ -347,9 +379,9 @@ function normWebScraper(rows) {
 
 export function ingestEvents(csvText) {
   const raw = splitRows(csvText);
-  let rows = normWebScraperMarkets(raw) || normWebScraper(raw) || normBG(raw) || normSpreadexList(raw) || normSpreadex(raw) || normBetanoMatch(raw) || normEN(raw);
+  let rows = normWebScraperMarkets(raw) || normWebScraperPlayers(raw) || normWebScraper(raw) || normBG(raw) || normSpreadexList(raw) || normSpreadex(raw) || normBetanoMatch(raw) || normEN(raw);
   // scraped soccer files: keep only the big-turnover markets (rest is noise)
-  const KEEP_SOCCER = new Set(["x12", "goals_ou", "ou25", "btts", "cs", "ah"]);
+  const KEEP_SOCCER = new Set(["x12", "goals_ou", "ou25", "btts", "cs", "ah", "corners_ou", "corners", "cards_ou", "cards", "team_total", "htr", "dc", "dnb"]);
   if (rows) rows = rows.filter((r) => String(r.sport).toLowerCase() !== "soccer" || KEEP_SOCCER.has(r.market));
   if (!rows) rows = parseCSV(csvText);
   const seen = new Set(); let fixtures = 0, odds = 0;
