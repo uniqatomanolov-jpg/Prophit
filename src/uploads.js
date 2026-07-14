@@ -328,6 +328,7 @@ function normWebScraperBasket(rows){
   for(var i=1;i<rows.length;i++){
     var r=rows[i]; var home=(r[iH]||"").trim(), away=(r[iA]||"").trim();
     if(!home||!away)continue;
+    if(/league|liga\b|euroleague|summer|wnba\b|- nba|serie\b|division/i.test(home)||/league|liga\b|euroleague|summer|division/i.test(away))continue; // league header rows are not teams
     var rawTime=(r[iTime]||"").replace(/\+\d+$/,"").trim();   // strip "+3" tz suffix
     var kickoff=whenToKickoff(rawTime);
     var base={sport:sport,kickoff:kickoff,competition:sport==="nba"?"Basketball":sport.charAt(0).toUpperCase()+sport.slice(1),home:home,away:away};

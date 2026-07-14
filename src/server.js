@@ -154,6 +154,29 @@ const requireAdmin = (req, res, next) => {
 // finished-but-unsettled games (for the manual settle panel)
 app.get("/api/unsettled", requireAdmin, (_, res) => res.json(q.unsettledPast.all()));
 
+// Admin: delete one fixture (and its picks/odds) — for junk rows or long-finished games
+app.post("/api/fixture/delete", requireAdmin, (req, res) => {
+  const { id } = req.body || {};
+  if (!id) return res.status(400).json({ error: "need id" });
+  db.prepare("DELETE FROM picks WHERE fixture_id=?").run(id);
+  db.prepare("DELETE FROM odds WHERE fixture_id=?").run(id);
+  const r = db.prepare("DELETE FROM fixtures WHERE id=?").run(id);
+  res.json({ ok: true, deleted: r.changes });
+});
+
+// Admin: clear ALL past-dated unsettled manual games (junk/finished leftovers). Deletes their picks.
+app.post("/api/clear-finished", requireAdmin, (_, res) => {
+  const rows = q.unsettledPast.all();
+  let n = 0;
+  for (const f of rows) {
+    db.prepare("DELETE FROM picks WHERE fixture_id=?").run(f.id);
+    db.prepare("DELETE FROM odds WHERE fixture_id=?").run(f.id);
+    n += db.prepare("DELETE FROM fixtures WHERE id=?").run(f.id).changes;
+  }
+  console.log(`[clear-finished] deleted ${n} games`);
+  res.json({ ok: true, deleted: n });
+});
+
 // One-click rescue: any manual game whose (guessed) kickoff slipped into the past but was never
 // settled gets bumped to the next evening slot → back on the Live Feed, out of the settle queue.
 app.post("/api/fix-dates", requireAdmin, (_, res) => {
