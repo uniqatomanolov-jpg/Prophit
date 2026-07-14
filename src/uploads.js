@@ -43,7 +43,7 @@ const futureSlot = () => {                       // 20:00 today, or tomorrow if 
 };
 const pad = (n) => String(n).padStart(2, "0");
 function dateFrom(dstr, tstr) {
-  const t = (tstr || "").trim() || "00:00";
+  const t = (tstr || "").trim() || "20:00";
   if (!dstr) {
     // time-only rows (darts/snooker/F1 scrapes): if that time already passed today,
     // the game is tomorrow — otherwise it would be hidden as "already started".

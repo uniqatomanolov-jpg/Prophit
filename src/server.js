@@ -154,6 +154,22 @@ const requireAdmin = (req, res, next) => {
 // finished-but-unsettled games (for the manual settle panel)
 app.get("/api/unsettled", requireAdmin, (_, res) => res.json(q.unsettledPast.all()));
 
+// One-click rescue: any manual game whose (guessed) kickoff slipped into the past but was never
+// settled gets bumped to the next evening slot → back on the Live Feed, out of the settle queue.
+app.post("/api/fix-dates", requireAdmin, (_, res) => {
+  const now = new Date();
+  let slot = new Date(now.toISOString().slice(0, 10) + "T20:00:00");
+  if (slot.getTime() < now.getTime() + 30 * 60e3) slot = new Date(slot.getTime() + 24 * 3600e3);
+  const k = slot.toISOString().slice(0, 10) + " 20:00";
+  const r = db.prepare(`
+    UPDATE fixtures SET kickoff=@k, status='upcoming'
+    WHERE id LIKE 'manual:%' AND status='upcoming' AND kickoff IS NOT NULL
+      AND datetime(replace(kickoff,' ','T')) < datetime('now')
+  `).run({ k });
+  console.log(`[fix-dates] moved ${r.changes} games to ${k}`);
+  res.json({ ok: true, moved: r.changes, kickoff: k });
+});
+
 // settle one game by typing the final score — grades every score-derivable pick
 app.post("/api/settle", requireAdmin, (req, res) => {
   try {
