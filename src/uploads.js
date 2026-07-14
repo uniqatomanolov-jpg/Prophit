@@ -305,7 +305,6 @@ function marketIdFromTitle(t){
   if(/to qualify/.test(x))return "qualify";
   if(/both teams|btts/.test(x))return "btts";
   if(/correct score/.test(x))return "cs";
-  if(/team total/.test(x))return "team_total";
   if(/total/.test(x))return "goals_ou";
   if(/handicap|spread|asian/.test(x))return "ah";
   if(/half/.test(x))return "htr";
@@ -500,7 +499,7 @@ export function ingestResults(csvText) {
         if (p.market !== r.market) continue;
         let c = isPickCorrect(p.market, p.pick, r.outcome);
         if (c == null) c = norm(p.pick) === norm(r.outcome) ? 1 : 0;
-        gradePick.run({ correct: c, fixture_id: id, model: p.model, market: p.market }); graded++;
+        gradePick.run({ correct: c, fixture_id: id, market: p.market, model: p.model }); graded++;
       }
     }
   });
