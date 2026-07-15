@@ -29,6 +29,35 @@ CREATE TABLE IF NOT EXISTS picks (
   PRIMARY KEY (fixture_id, model, market)
 );
 
+CREATE TABLE IF NOT EXISTS users (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  email TEXT UNIQUE,
+  stripe_customer_id TEXT,
+  stripe_subscription_id TEXT,
+  subscription_status TEXT DEFAULT 'none',
+  subscription_tier TEXT DEFAULT 'free',
+  created_at TEXT DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS compounding_runs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT DEFAULT 'Run to a Million',
+  starting_bankroll REAL DEFAULT 100.0,
+  current_bankroll REAL DEFAULT 100.0,
+  peak_bankroll REAL DEFAULT 100.0,
+  status TEXT DEFAULT 'active',
+  created_at TEXT DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS compounding_bets (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id INTEGER,
+  fixture_id TEXT,
+  market TEXT,
+  option TEXT,
+  odds REAL,
+  stake REAL,
+  status TEXT DEFAULT 'pending',
+  created_at TEXT DEFAULT (datetime('now'))
+);
 CREATE TABLE IF NOT EXISTS outcomes (
   fixture_id INTEGER, market TEXT, outcome TEXT,
   PRIMARY KEY (fixture_id, market)
@@ -36,7 +65,7 @@ CREATE TABLE IF NOT EXISTS outcomes (
 `);
 
 // safe migration — add value-betting columns if an older DB predates them
-for (const col of ["probability REAL", "edge REAL"]) {
+for (const col of ["probability REAL", "edge REAL", "settled_odds REAL", "settled_fair_price REAL", "edge_at_placement REAL", "settled_at TEXT"]) {
   try { db.exec(`ALTER TABLE picks ADD COLUMN ${col}`); } catch { /* already exists */ }
 }
 
@@ -61,7 +90,13 @@ export const setOutcome = db.prepare(`
   ON CONFLICT(fixture_id, market) DO UPDATE SET outcome=@outcome
 `);
 
-export const gradePick = db.prepare(`UPDATE picks SET correct=@correct WHERE fixture_id=@fixture_id AND model=@model AND market=@market`);
+export const gradePick = db.prepare(`
+  UPDATE picks SET correct=@correct,
+    settled_odds=COALESCE(settled_odds, price),
+    settled_fair_price=COALESCE(settled_fair_price, CASE WHEN probability>0 THEN ROUND(100.0/probability,3) ELSE NULL END),
+    edge_at_placement=COALESCE(edge_at_placement, edge),
+    settled_at=COALESCE(settled_at, datetime('now'))
+  WHERE fixture_id=@fixture_id AND model=@model AND market=@market`);
 export const markFinal = db.prepare(`UPDATE fixtures SET status='final', score=@score WHERE id=@id`);
 
 export const q = {
@@ -97,6 +132,21 @@ export const q = {
     ORDER BY f.kickoff DESC LIMIT 400`),
   // headline P&L stats (settled Claude picks only — honest record)
   distinctSports: db.prepare(`SELECT DISTINCT sport FROM fixtures ORDER BY sport`),
+  cmpActiveRun: db.prepare(`SELECT * FROM compounding_runs WHERE status='active' ORDER BY id DESC LIMIT 1`),
+  userByEmail: db.prepare(`SELECT * FROM users WHERE email=@email`),
+  userByCustomer: db.prepare(`SELECT * FROM users WHERE stripe_customer_id=@cid`),
+  userUpsert: db.prepare(`INSERT INTO users (email, stripe_customer_id, stripe_subscription_id, subscription_status, subscription_tier)
+    VALUES (@email,@cid,@sid,@status,@tier)
+    ON CONFLICT(email) DO UPDATE SET stripe_customer_id=COALESCE(@cid,stripe_customer_id),
+      stripe_subscription_id=COALESCE(@sid,stripe_subscription_id), subscription_status=@status, subscription_tier=@tier`),
+  userSetStatusByCustomer: db.prepare(`UPDATE users SET subscription_status=@status, subscription_tier=@tier, stripe_subscription_id=COALESCE(@sid,stripe_subscription_id) WHERE stripe_customer_id=@cid`),
+  cmpArchiveAll: db.prepare(`UPDATE compounding_runs SET status='archived' WHERE status='active'`),
+  cmpNewRun: db.prepare(`INSERT INTO compounding_runs (name, starting_bankroll, current_bankroll, peak_bankroll) VALUES (@name, @bank, @bank, @bank)`),
+  cmpBets: db.prepare(`SELECT b.*, f.home, f.away, f.sport, f.comp, f.kickoff FROM compounding_bets b LEFT JOIN fixtures f ON f.id=b.fixture_id WHERE b.run_id=@run ORDER BY b.id ASC`),
+  cmpPendingForFixture: db.prepare(`SELECT b.* FROM compounding_bets b JOIN compounding_runs r ON r.id=b.run_id WHERE r.status='active' AND b.status='pending' AND b.fixture_id=@fid`),
+  cmpAddBet: db.prepare(`INSERT INTO compounding_bets (run_id, fixture_id, market, option, odds, stake) VALUES (@run, @fid, @market, @option, @odds, @stake)`),
+  cmpSetBet: db.prepare(`UPDATE compounding_bets SET status=@status WHERE id=@id`),
+  cmpSetBank: db.prepare(`UPDATE compounding_runs SET current_bankroll=@bank, peak_bankroll=MAX(peak_bankroll,@bank), status=@status WHERE id=@id`),
   unsettledPast: db.prepare(`
     SELECT f.id, f.sport, f.comp, f.home, f.away, f.kickoff,
       (SELECT COUNT(*) FROM picks p WHERE p.fixture_id=f.id) npicks
@@ -109,16 +159,20 @@ export const q = {
   claudeStats: db.prepare(`
     SELECT COUNT(*) total,
       SUM(p.correct) wins,
-      ROUND(SUM(CASE WHEN p.correct=1 THEN COALESCE(p.price,1.9)-1 ELSE -1 END), 2) profit,
+      ROUND(SUM(CASE WHEN p.correct=1 THEN COALESCE(p.settled_odds,p.price,1.9)-1 ELSE -1 END), 2) profit,
       ROUND(100.0*SUM(p.correct)/COUNT(*),1) accuracy,
-      ROUND(100.0*SUM(CASE WHEN p.correct=1 THEN COALESCE(p.price,1.9)-1 ELSE -1 END)/COUNT(*),1) roi,
+      ROUND(100.0*SUM(CASE WHEN p.correct=1 THEN COALESCE(p.settled_odds,p.price,1.9)-1 ELSE -1 END)/COUNT(*),1) roi,
       ROUND(AVG(p.edge),1) avg_edge
     FROM picks p JOIN fixtures f ON f.id=p.fixture_id
     WHERE p.model='claude' AND p.correct IS NOT NULL AND (@sport='all' OR f.sport=@sport)`),
   // settled bet history ("receipts") — most recent first, with running profit computed in JS
   claudeHistory: db.prepare(`
     SELECT f.sport, f.comp, f.home, f.away, f.kickoff, f.score,
-      p.market, p.pick, p.price, p.probability, p.edge, p.correct
+      p.market, p.pick,
+      COALESCE(p.settled_odds, p.price) AS price,
+      p.probability,
+      COALESCE(p.edge_at_placement, p.edge) AS edge,
+      p.correct, p.settled_at
     FROM picks p JOIN fixtures f ON f.id=p.fixture_id
     WHERE p.model='claude' AND p.correct IS NOT NULL AND (@sport='all' OR f.sport=@sport)
     ORDER BY f.kickoff DESC LIMIT 200`),

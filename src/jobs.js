@@ -196,7 +196,13 @@ export async function settleManualFromScores() {
       let graded = 0;
       for (const pk of q.picksFor.all(f.id)) {
         const c = correctFromScore(pk.market, pk.pick, hs, as, f.home, f.away);
-        if (c != null) { gradePick.run({ correct: c, fixture_id: f.id, model: pk.model, market: pk.market }); graded++; }
+        if (c != null) { gradePick.run({ correct: c, fixture_id: f.id, model: pk.model, market: pk.market }); graded++;
+          // compounding: settle any pending mission bet on this exact market/pick
+          const run = q.cmpActiveRun.get();
+          if (run) for (const cb of q.cmpPendingForFixture.all({ fid: f.id })) {
+            if (cb.market === pk.market) { const { settleCompoundingBet } = await import("./compounding.js"); settleCompoundingBet(cb.id, c ? "win" : "loss", run); }
+          }
+        }
       }
       console.log(`[settle] ${f.home} ${hs}-${as} ${f.away} → graded ${graded} picks`);
     }
