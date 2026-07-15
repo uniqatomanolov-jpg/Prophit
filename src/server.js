@@ -1,4 +1,4 @@
-import 'dotenv/config';
+import "dotenv/config";
 import express from "express";
 import cron from "node-cron";
 import { q, db, markFinal, gradePick } from "./db.js";
@@ -6,16 +6,13 @@ import { syncFixtures, generatePicks, gradeFinished, correctFromScore } from "./
 import { parseScreenshot } from "./vision.js";
 import { settleCompoundingBet } from "./compounding.js";
 import { createCheckout, handleWebhook, billingEnabled, isPro } from "./billing.js";
-import { ingestEvents, ingestResults } from "./uploads.js";
-
 let predictBusy = false;
 function predictSoon() {
-   
   if (predictBusy) return;
   predictBusy = true;
   generatePicks().catch((e) => console.error("[auto-predict]", e.message)).finally(() => { predictBusy = false; });
 }
-
+import { ingestEvents, ingestResults } from "./uploads.js";
 
 const app = express();
 // Stripe webhook needs the raw body for signature verification — mount BEFORE json parser.
