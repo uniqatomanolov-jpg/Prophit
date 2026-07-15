@@ -3,6 +3,9 @@ import express from "express";
 import cron from "node-cron";
 import { q, db, markFinal, gradePick } from "./db.js";
 import { syncFixtures, generatePicks, gradeFinished, correctFromScore } from "./jobs.js";
+import { parseScreenshot } from "./vision.js";
+import { settleCompoundingBet } from "./compounding.js";
+import { createCheckout, handleWebhook, billingEnabled, isPro } from "./billing.js";
 let predictBusy = false;
 function predictSoon() {
   if (predictBusy) return;
@@ -11,27 +14,20 @@ function predictSoon() {
 }
 import { ingestEvents, ingestResults } from "./uploads.js";
 
-
-// change this line (images are bigger than JSON):
+const app = express();
+// Stripe webhook needs the raw body for signature verification — mount BEFORE json parser.
+app.post("/api/stripe/webhook", express.raw({ type: "application/json" }), async (req, res) => {
+  try { const r = await handleWebhook(req.body, req.get("stripe-signature")); res.json(r); }
+  catch (e) { console.error("[stripe webhook]", e.message); res.status(400).json({ error: e.message }); }
+});
 app.use(express.json({ limit: "12mb" }));
-
-// add near app.post("/api/upload/events", ...):
-import { parseScreenshot } from "./vision.js";   // add with your other imports at the top
-
-app.post("/api/upload-screenshot", requireAdmin, async (req, res) => {
-  try {
-    let { image, mediaType } = req.body || {};
-    if (!image) return res.status(400).json({ error: "no image" });
-    // accept full data URLs OR bare base64
-    const m = String(image).match(/^data:(image\/\w+);base64,(.*)$/);
-    if (m) { mediaType = m[1]; image = m[2]; }
-    const out = await parseScreenshot(image, mediaType || "image/png");
-    res.json(out);
-    if (out.fixtures > 0) { console.log("[screenshot] auto-predicting…"); predictSoon(); }
-  } catch (e) {
-    console.error("[screenshot]", e.message);
-    res.status(400).json({ error: e.message });
-  }
+app.use(express.text({ type: ["text/csv", "text/plain"], limit: "5mb" }));
+app.use((req, res, next) => {
+  res.set("Access-Control-Allow-Origin", "*");
+  res.set("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+  res.set("Access-Control-Allow-Headers", "Content-Type, X-Admin-Key");
+  if (req.method === "OPTIONS") return res.sendStatus(204);
+  next();
 });
 
 // —— API for the React frontend ——————————————————
@@ -89,6 +85,16 @@ app.get("/api/picks", (req, res) => {
     outcome: r.outcome,                                   // null until settled
     result: r.correct == null ? "pending" : r.correct ? "win" : "loss",
   })));
+});
+
+app.get("/api/billing/status", (_, res) => res.json({ enabled: billingEnabled() }));
+
+app.post("/api/stripe/create-checkout-session", async (req, res) => {
+  try {
+    if (!billingEnabled()) return res.status(503).json({ error: "billing not configured yet" });
+    const url = await createCheckout({ plan: req.body?.plan || "monthly", email: req.body?.email });
+    res.json({ url });
+  } catch (e) { console.error("[checkout]", e.message); res.status(400).json({ error: e.message }); }
 });
 
 app.get("/api/health", (_, res) => res.json({ ok: true }));
@@ -162,6 +168,58 @@ const requireAdmin = (req, res, next) => {
   if (key && req.get("x-admin-key") !== key) return res.status(401).json({ error: "invalid admin key" });
   next();
 };
+
+// ===== MISSION: €100 → €1,000,000 compounding challenge =====
+const KELLY_MULT = Number(process.env.KELLY_MULT) || 0.25;   // quarter-Kelly
+function kellyStake(bankroll, odds, fairOdds) {
+  const b = odds - 1;
+  const p = fairOdds > 0 ? 1 / fairOdds : 0;
+  if (b <= 0 || p <= 0) return 0;
+  let f = KELLY_MULT * (p - (1 - p) / b);
+  f = Math.max(0, Math.min(0.25, f));                        // never risk >25% on one bet
+  return Math.round(bankroll * f * 100) / 100;
+}
+const MILESTONES = [100, 1000, 10000, 100000, 1000000];
+function runView(run) {
+  if (!run) return null;
+  const bets = q.cmpBets.all({ run: run.id });
+  let lvl = 0;
+  for (let i = 0; i < MILESTONES.length - 1; i++) if (run.current_bankroll >= MILESTONES[i]) lvl = i;
+  return { ...run, level: lvl + 1, nextTarget: MILESTONES[Math.min(lvl + 1, MILESTONES.length - 1)],
+    levelFloor: MILESTONES[lvl], bets };
+}
+
+app.get("/api/compounding/run/active", (_, res) => res.json(runView(q.cmpActiveRun.get()) || { none: true }));
+
+app.post("/api/compounding/run", requireAdmin, (req, res) => {
+  q.cmpArchiveAll.run();
+  const bank = Number(req.body?.starting_bankroll) || 100;
+  const name = req.body?.name || "Run to a Million";
+  q.cmpNewRun.run({ name, bank });
+  res.json(runView(q.cmpActiveRun.get()));
+});
+
+app.post("/api/compounding/bet", requireAdmin, (req, res) => {
+  const run = q.cmpActiveRun.get();
+  if (!run) return res.status(400).json({ error: "no active run — start one first" });
+  const { fixture_id, market, option, odds, fairOdds } = req.body || {};
+  if (!fixture_id || !market || !option || !odds) return res.status(400).json({ error: "need fixture_id, market, option, odds" });
+  let stake = Number(req.body?.stake);
+  if (!stake || stake <= 0) stake = kellyStake(run.current_bankroll, Number(odds), Number(fairOdds) || Number(odds));
+  stake = Math.min(stake, run.current_bankroll);
+  q.cmpAddBet.run({ run: run.id, fid: fixture_id, market, option, odds: Number(odds), stake });
+  res.json(runView(q.cmpActiveRun.get()));
+});
+
+app.post("/api/compounding/settle", requireAdmin, (req, res) => {
+  const { id, result } = req.body || {};   // result: 'win' | 'loss'
+  const run = q.cmpActiveRun.get();
+  if (!run || !id) return res.status(400).json({ error: "no run / id" });
+  settleCompoundingBet(Number(id), result, run);
+  res.json(runView(q.cmpActiveRun.get()));
+});
+
+
 // POST the CSV text with Content-Type: text/csv
 // finished-but-unsettled games (for the manual settle panel)
 app.get("/api/unsettled", requireAdmin, (_, res) => res.json(q.unsettledPast.all()));
@@ -222,6 +280,18 @@ app.post("/api/settle", requireAdmin, (req, res) => {
     }
     res.json({ ok: true, score: `${H}-${A}`, graded, skipped });
   } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
+app.post("/api/upload-screenshot", requireAdmin, async (req, res) => {
+  try {
+    let { image, mediaType } = req.body || {};
+    if (!image) return res.status(400).json({ error: "no image" });
+    const m = String(image).match(/^data:(image\/\w+);base64,(.*)$/);
+    if (m) { mediaType = m[1]; image = m[2]; }
+    const out = await parseScreenshot(image, mediaType || "image/png");
+    res.json(out);
+    if (out.fixtures > 0) { console.log("[screenshot] auto-predicting…"); predictSoon(); }
+  } catch (e) { console.error("[screenshot]", e.message); res.status(400).json({ error: e.message }); }
 });
 
 app.post("/api/upload/events", requireAdmin, (req, res) => {
