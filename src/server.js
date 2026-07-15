@@ -1,10 +1,12 @@
-import "dotenv/config";
+import 'dotenv/config';
 import express from "express";
 import cron from "node-cron";
-import { q, db, markFinal, gradePick } from "./db.js";
+import { q, db, markFinal, GradePick } from "./db.js";
 import { syncFixtures, generatePicks, gradeFinished, correctFromScore } from "./jobs.js";
 import { parseScreenshot } from "./vision.js";
 import { settleCompoundingBet } from "./compounding.js";
+import { createCheckout, handleWebhook, billingEnabled, isPro } from "./billing.js";
+import { ingestEvents, ingestResults } from "./uploads.js"; // <--- MOVED HERE
 import { createCheckout, handleWebhook, billingEnabled, isPro } from "./billing.js";
 let predictBusy = false;
 function predictSoon() {
