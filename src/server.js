@@ -11,15 +11,26 @@ function predictSoon() {
 }
 import { ingestEvents, ingestResults } from "./uploads.js";
 
-const app = express();
-app.use(express.json());
-app.use(express.text({ type: ["text/csv", "text/plain"], limit: "5mb" }));
-app.use((req, res, next) => {
-  res.set("Access-Control-Allow-Origin", "*");
-  res.set("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
-  res.set("Access-Control-Allow-Headers", "Content-Type, X-Admin-Key");
-  if (req.method === "OPTIONS") return res.sendStatus(204);
-  next();
+// change this line (images are bigger than JSON):
+app.use(express.json({ limit: "12mb" }));
+
+// add near app.post("/api/upload/events", ...):
+import { parseScreenshot } from "./vision.js";   // add with your other imports at the top
+
+app.post("/api/upload-screenshot", requireAdmin, async (req, res) => {
+  try {
+    let { image, mediaType } = req.body || {};
+    if (!image) return res.status(400).json({ error: "no image" });
+    // accept full data URLs OR bare base64
+    const m = String(image).match(/^data:(image\/\w+);base64,(.*)$/);
+    if (m) { mediaType = m[1]; image = m[2]; }
+    const out = await parseScreenshot(image, mediaType || "image/png");
+    res.json(out);
+    if (out.fixtures > 0) { console.log("[screenshot] auto-predicting…"); predictSoon(); }
+  } catch (e) {
+    console.error("[screenshot]", e.message);
+    res.status(400).json({ error: e.message });
+  }
 });
 
 // —— API for the React frontend ——————————————————
