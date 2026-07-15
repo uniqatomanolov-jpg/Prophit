@@ -168,7 +168,28 @@ const requireAdmin = (req, res, next) => {
   if (key && req.get("x-admin-key") !== key) return res.status(401).json({ error: "invalid admin key" });
   next();
 };
-
+// Admin: full wipe — clears every fixture, odds line, pick and outcome so you can
+// re-upload from scratch. Users/billing rows are left untouched.
+app.post("/api/admin/reset-all", requireAdmin, (req, res) => {
+  const counts = {
+    picks: db.prepare("SELECT COUNT(*) n FROM picks").get().n,
+    odds: db.prepare("SELECT COUNT(*) n FROM odds").get().n,
+    fixtures: db.prepare("SELECT COUNT(*) n FROM fixtures").get().n,
+    outcomes: db.prepare("SELECT COUNT(*) n FROM outcomes").get().n,
+  };
+  const wipe = db.transaction(() => {
+    db.prepare("DELETE FROM picks").run();
+    db.prepare("DELETE FROM odds").run();
+    db.prepare("DELETE FROM outcomes").run();
+    db.prepare("DELETE FROM fixtures").run();
+    if (req.body?.compounding) {
+      db.prepare("DELETE FROM compounding_bets").run();
+      db.prepare("DELETE FROM compounding_runs").run();
+    }
+  });
+  wipe();
+  res.json({ ok: true, deleted: counts, compoundingReset: !!req.body?.compounding });
+});
 // ===== MISSION: €100 → €1,000,000 compounding challenge =====
 const KELLY_MULT = Number(process.env.KELLY_MULT) || 0.25;   // quarter-Kelly
 function kellyStake(bankroll, odds, fairOdds) {
