@@ -7,8 +7,10 @@ import { parseScreenshot } from "./vision.js";
 import { settleCompoundingBet } from "./compounding.js";
 import { createCheckout, handleWebhook, billingEnabled, isPro } from "./billing.js";
 import { ingestEvents, ingestResults } from "./uploads.js";
+
 let predictBusy = false;
 function predictSoon() {
+    // ... rest of your code
   if (predictBusy) return;
   predictBusy = true;
   generatePicks().catch((e) => console.error("[auto-predict]", e.message)).finally(() => { predictBusy = false; });
