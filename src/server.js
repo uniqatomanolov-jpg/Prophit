@@ -2,7 +2,6 @@ import 'dotenv/config';
 import express from "express";
 import cron from "node-cron";
 import { q, db, markFinal, gradePick } from "./db.js";
-import { GradePick } from "./models.js"; // wherever it actually lives
 import { syncFixtures, generatePicks, gradeFinished, correctFromScore } from "./jobs.js";
 import { parseScreenshot } from "./vision.js";
 import { settleCompoundingBet } from "./compounding.js";
