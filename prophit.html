@@ -69,6 +69,29 @@ b,strong{font-weight:600;}
 .sport b{opacity:.65;margin-left:3px;font-family:'IBM Plex Mono';}
 .freeline{color:var(--claude);font-size:12.5px;margin:2px 0 16px;}
 
+/* fixed left sidebar (desktop) / off-canvas drawer (mobile) — reuses the
+   existing .sports/.sport markup and data-a="sport" click handling as-is */
+.sports{position:fixed;top:0;left:0;width:250px;height:100vh;margin:0;
+  display:flex;flex-direction:column;gap:6px;overflow-y:auto;overscroll-behavior:contain;
+  padding:86px 14px 24px;background:var(--panel);border-right:1px solid var(--line);
+  z-index:40;transition:transform .25s ease;}
+.sports::-webkit-scrollbar{width:6px;height:0;}
+.sport{display:flex;align-items:center;width:100%;justify-content:flex-start;}
+.sport b{margin-left:auto;}
+#root:has(.sports){padding-left:250px;}
+.hambtn{display:none;width:34px;height:34px;border-radius:8px;border:1px solid var(--line);
+  background:var(--panel);color:var(--ink);font-size:16px;align-items:center;justify-content:center;}
+.sidebar-backdrop{display:none;}
+@media (max-width:880px){
+  #root:has(.sports){padding-left:0;}
+  .sports{transform:translateX(-100%);box-shadow:0 0 40px rgba(0,0,0,.5);}
+  .sports.open{transform:translateX(0);}
+  .hambtn{display:inline-flex;}
+  .sidebar-backdrop{display:block;position:fixed;inset:0;background:rgba(3,7,13,.6);
+    z-index:39;opacity:0;pointer-events:none;transition:opacity .2s;}
+  .sidebar-backdrop.open{opacity:1;pointer-events:auto;}
+}
+
 /* match card */
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:16px;align-items:start;}
 .card{background:linear-gradient(180deg,var(--panel),var(--panel2));border:1px solid var(--line);border-radius:var(--radius-lg);padding:16px;transition:border-color .16s,transform .16s,box-shadow .16s;}
@@ -545,7 +568,7 @@ function loadMarkets(sport){fetch(API_BASE+"/api/markets?sport="+sport).then(fun
 var PLANS=[{id:"weekly",label:"Weekly",price:"€4.99",per:"/week",sub:"Billed weekly"},{id:"annual",label:"Annual",price:"€59.99",per:"/year",sub:"7-day free trial · save 50%",best:true,trial:true},{id:"monthly",label:"Monthly",price:"€9.99",per:"/month",sub:"Billed monthly"}];
 var PRO_ROWS=[["Daily consensus pick",true],[FREE+" free picks per sport",true],["All four models' picks + confidence",false],["Every market",false],["All "+TOTAL+"+ games",false],["Full history + ROI",false],["All sports",false]];
 
-var S={ageOk:false,tab:"matches",sport:"soccer",pro:false,admin:false,plan:"annual",mkt:{},lbMarket:"all",starMin:0,gear:false};
+var S={ageOk:false,tab:"matches",sport:"soccer",pro:false,admin:false,plan:"annual",mkt:{},lbMarket:"all",starMin:0,gear:false,sidebarOpen:false};
 function adminKey(){try{return localStorage.getItem("orakl_admin_key")||"";}catch(e){return "";}}
 try{if(adminKey())S.admin=true;}catch(e){}
 try{if(typeof window!=='undefined'&&/[?&]sub=success/.test(window.location.search)){S.pro=true;S.tab='matches';if(window.history&&window.history.replaceState)window.history.replaceState(null,'',window.location.pathname);}}catch(e){}
@@ -664,7 +687,7 @@ function cardHTML(g,sportKey){
  return h+'</article>';
 }
 function visCount(k){if(!LIVE)return COUNT[k]||0;var g=LIVEGAMES[k];if(!g)return '';return g.filter(function(x){return x.status!=='final';}).length;}
-function sportStrip(withCounts){return '<div class="sports">'+SPORTS.map(function(sp){var c=withCounts?visCount(sp.key):'';var dead=withCounts&&LIVE&&c===0;return '<button class="sport'+(S.sport===sp.key?' on':'')+(dead?' dead':'')+'"'+(dead?'':' data-a="sport"')+' data-s="'+sp.key+'">'+sp.icon+' '+sp.label+(c!==''?' <b>'+c+'</b>':'')+'</button>';}).join('')+'</div>';}
+function sportStrip(withCounts){return '<div class="sports'+(S.sidebarOpen?' open':'')+'"><button class="hambtn sports-close" data-a="togglesidebar" style="margin-bottom:6px;align-self:flex-end">\u2715</button>'+SPORTS.map(function(sp){var c=withCounts?visCount(sp.key):'';var dead=withCounts&&LIVE&&c===0;return '<button class="sport'+(S.sport===sp.key?' on':'')+(dead?' dead':'')+'"'+(dead?'':' data-a="sport"')+' data-s="'+sp.key+'">'+sp.icon+' '+sp.label+(c!==''?' <b>'+c+'</b>':'')+'</button>';}).join('')+'</div>';}
 var COUNTED=false;
 function animateStats(){
  if(COUNTED||typeof document.querySelectorAll!=="function")return;
@@ -955,7 +978,8 @@ function render(){
  var body=S.tab==="matches"?matchesHTML():('<div class="narrow">'+inner+'</div>');
  var tabs=[["matches","Live Feed"],["value","\ud83d\udd25 Value Board"],["mission","\ud83d\ude80 Mission"],["board","Track Record"],["pricing",S.pro?"Account":"Plans"]];
  if(S.admin)tabs.push(["upload","⬆ Upload"]);
- root.innerHTML='<header class="hdr"><div class="brand"><svg class="logo" viewBox="0 0 40 40" width="34" height="34" aria-hidden="true"><circle cx="20" cy="20" r="10.5" fill="none" stroke="#00F0FF" stroke-width="2.4"/><path d="M17.4 10.2 A10.5 10.5 0 0 0 17.4 29.8 Z" fill="#00F0FF"/><line x1="20" y1="3.5" x2="20" y2="36.5" stroke="#00F0FF" stroke-width="2.1" stroke-linecap="round"/></svg><div class="mark">OR<span>A</span>KL</div><span class="quantchip">QUANT</span></div><div style="display:flex;gap:8px;align-items:center">'+(S.admin?'<button class="adminbtn on" data-a="admin" title="Click to exit admin">👑 Admin Workspace</button>':'')+((S.pro||S.admin)?'':'<button class="gopro" data-a="pro">Go Pro</button>')+'</div></header>'+
+ root.innerHTML='<div class="sidebar-backdrop'+(S.sidebarOpen?' open':'')+'" data-a="togglesidebar"></div>'+
+  '<header class="hdr"><div class="brand"><button class="hambtn" data-a="togglesidebar" aria-label="Toggle sports menu">\u2630</button><svg class="logo" viewBox="0 0 40 40" width="34" height="34" aria-hidden="true"><circle cx="20" cy="20" r="10.5" fill="none" stroke="#00F0FF" stroke-width="2.4"/><path d="M17.4 10.2 A10.5 10.5 0 0 0 17.4 29.8 Z" fill="#00F0FF"/><line x1="20" y1="3.5" x2="20" y2="36.5" stroke="#00F0FF" stroke-width="2.1" stroke-linecap="round"/></svg><div class="mark">OR<span>A</span>KL</div><span class="quantchip">QUANT</span></div><div style="display:flex;gap:8px;align-items:center">'+(S.admin?'<button class="adminbtn on" data-a="admin" title="Click to exit admin">👑 Admin Workspace</button>':'')+((S.pro||S.admin)?'':'<button class="gopro" data-a="pro">Go Pro</button>')+'</div></header>'+
   '<p class="tagline">Quantitative line arbitrage &amp; value edge tracking across live markets</p>'+
   '<nav class="tabs">'+tabs.map(function(t){return '<button class="tab'+(S.tab===t[0]?' on':'')+'" data-a="tab" data-t="'+t[0]+'">'+t[1]+'</button>';}).join('')+'</nav><main>'+body+'</main>';
  window.scrollTo(0,y);
@@ -966,8 +990,9 @@ function render(){
 document.getElementById("root").addEventListener("click",function(e){
  var el=e.target.closest("[data-a]");if(!el)return;var a=el.getAttribute("data-a");
  if(a==="age"){S.ageOk=true;window.scrollTo(0,0);}
- else if(a==="tab"){S.tab=el.getAttribute("data-t");window.scrollTo(0,0);}
- else if(a==="sport"){S.sport=el.getAttribute("data-s");S.lbMarket="all";window.scrollTo(0,0);}
+ else if(a==="tab"){S.tab=el.getAttribute("data-t");S.sidebarOpen=false;window.scrollTo(0,0);}
+ else if(a==="sport"){S.sport=el.getAttribute("data-s");S.lbMarket="all";S.sidebarOpen=false;window.scrollTo(0,0);}
+ else if(a==="togglesidebar"){S.sidebarOpen=!S.sidebarOpen;}
  else if(a==="mkt"){S.mkt[el.getAttribute("data-g")]=el.getAttribute("data-m");}
  else if(a==="pro"){S.tab="pricing";window.scrollTo(0,0);}
  else if(a==="plan"){S.plan=el.getAttribute("data-p");}
