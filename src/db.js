@@ -132,6 +132,14 @@ export const q = {
     ORDER BY f.kickoff DESC LIMIT 400`),
   // headline P&L stats (settled Claude picks only — honest record)
   distinctSports: db.prepare(`SELECT DISTINCT sport FROM fixtures ORDER BY sport`),
+  bySport: db.prepare(`
+    SELECT f.sport AS sport,
+      COUNT(*) AS settled,
+      ROUND(100.0*SUM(CASE WHEN p.correct=1 THEN 1 ELSE 0 END)/COUNT(*),1) AS winRate,
+      ROUND(100.0*SUM(CASE WHEN p.correct=1 THEN COALESCE(p.settled_odds,p.price,1.9)-1 ELSE -1 END)/COUNT(*),1) AS roi
+    FROM picks p JOIN fixtures f ON f.id=p.fixture_id
+    WHERE p.model='claude' AND p.correct IS NOT NULL
+    GROUP BY f.sport HAVING COUNT(*) >= 1 ORDER BY roi DESC`),
   cmpActiveRun: db.prepare(`SELECT * FROM compounding_runs WHERE status='active' ORDER BY id DESC LIMIT 1`),
   userByEmail: db.prepare(`SELECT * FROM users WHERE email=@email`),
   userByCustomer: db.prepare(`SELECT * FROM users WHERE stripe_customer_id=@cid`),

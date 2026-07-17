@@ -141,6 +141,7 @@ app.get("/api/track", (req, res) => {
       kickoff: h.kickoff, score: h.score, market: h.market, pick: h.pick,
       odds: h.price, edge: h.edge, result: h.correct ? "win" : "loss",
     })),
+    bySport: (sport === "all") ? q.bySport.all() : [],
   });
 });
 
@@ -168,24 +169,7 @@ const requireAdmin = (req, res, next) => {
   if (key && req.get("x-admin-key") !== key) return res.status(401).json({ error: "invalid admin key" });
   next();
 };
-app.get("/api/admin/reset-all-now", (req, res) => {
-  const key = process.env.ADMIN_KEY;
-  if (key && req.query.key !== key) return res.status(401).send("invalid admin key");
-  const counts = {
-    picks: db.prepare("SELECT COUNT(*) n FROM picks").get().n,
-    odds: db.prepare("SELECT COUNT(*) n FROM odds").get().n,
-    fixtures: db.prepare("SELECT COUNT(*) n FROM fixtures").get().n,
-    outcomes: db.prepare("SELECT COUNT(*) n FROM outcomes").get().n,
-  };
-  const wipe = db.transaction(() => {
-    db.prepare("DELETE FROM picks").run();
-    db.prepare("DELETE FROM odds").run();
-    db.prepare("DELETE FROM outcomes").run();
-    db.prepare("DELETE FROM fixtures").run();
-  });
-  wipe();
-  res.send(`Reset done. Deleted: ${JSON.stringify(counts)}`);
-});
+
 // ===== MISSION: €100 → €1,000,000 compounding challenge =====
 const KELLY_MULT = Number(process.env.KELLY_MULT) || 0.25;   // quarter-Kelly
 function kellyStake(bankroll, odds, fairOdds) {

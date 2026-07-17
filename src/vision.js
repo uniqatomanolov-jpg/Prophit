@@ -14,11 +14,15 @@ function toCsvRows(items){
   const rows=[["sport","kickoff","competition","home","away","market","option","line","odds"]];
   const esc=(v)=>{const s=String(v??"");return /[",\n]/.test(s)?`"${s.replace(/"/g,'""')}"`:s;};
   for(const it of items||[]){
-    if(!it||!it.home||!it.away||!it.odds)continue;
+    if(!it||!it.home||(!it.away&&!Array.isArray(it.selections)))continue;
+    if(!it.odds&&!Array.isArray(it.selections))continue;
+    it.odds=it.odds||{};
     const ko=it.kickoff&&it.kickoff!=="UNKNOWN"?it.kickoff:"";
     const mk=it.market||(it.odds.draw!=null?"x12":"ml");
     const push=(option,odds)=>{if(odds==null||isNaN(Number(odds)))return;rows.push([it.sport||"soccer",ko,it.competition||"Screenshot",it.home,it.away,mk,option,"",Number(odds)].map(esc).join(","));};
-    if(mk==="x12"){push("home",it.odds.home);push("draw",it.odds.draw);push("away",it.odds.away);}
+    if(mk==="x12"||mk==="corners_3way"){push("home",it.odds.home);push("draw",it.odds.draw);push("away",it.odds.away);}
+    else if(it.odds.over!=null||it.odds.under!=null){var ln=it.line!=null?" "+it.line:"";push("Over"+ln,it.odds.over);push("Under"+ln,it.odds.under);}
+    else if(Array.isArray(it.selections)){it.selections.forEach(function(sel){push(sel.name,sel.odds);});}
     else{push(it.home,it.odds.home);push(it.away,it.odds.away);}
   }
   return rows.join("\n");
