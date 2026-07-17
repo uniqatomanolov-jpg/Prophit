@@ -107,7 +107,6 @@ app.get("/api/cron", async (_, res) => {
   cronBusy = true;
   res.json({ ok: true, started: true });   // reply immediately; work continues
   try {
-    await syncFixtures();
     await generatePicks();
     await gradeFinished();
     console.log("[cron] cycle complete");
@@ -309,12 +308,11 @@ app.post("/api/upload/results", requireAdmin, (req, res) => {
 });
 
 // manual job triggers (protect these behind auth before going public)
-app.post("/api/jobs/sync", async (_, res) => { await syncFixtures(); res.json({ ok: true }); });
+app.post("/api/jobs/sync", async (_, res) => { res.json({ ok: true, note: "upload-driven; no external sync" }); });
 app.post("/api/jobs/predict", async (_, res) => { await generatePicks(); res.json({ ok: true }); });
 app.post("/api/jobs/grade", async (_, res) => { await gradeFinished(); res.json({ ok: true }); });
 
 // —— schedule ————————————————————————————————————
-cron.schedule("0 */6 * * *", () => syncFixtures().catch(console.error));   // fixtures+odds 4×/day
 cron.schedule("30 */6 * * *", () => generatePicks().catch(console.error)); // picks after each sync
 cron.schedule("*/30 * * * *", () => gradeFinished().catch(console.error)); // grade every 30 min
 

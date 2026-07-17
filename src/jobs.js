@@ -2,7 +2,6 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 import "dotenv/config";
 import { db, upsertFixture, upsertOdd, insertPick, setOutcome, gradePick, markFinal, q } from "./db.js";
 import { SPORTS, isRace } from "./sports.js";
-import { theoddsapi } from "./providers/theoddsapi.js";
 import { adapterFor } from "./providers/index.js";
 import { buildPrompt } from "./providers/models.js";
 import { activeProviders } from "./providers/models.js";
@@ -30,24 +29,8 @@ const norm = (f, sport) => ({
 
 // —— 1. Sync fixtures + odds across all enabled sports ——
 export async function syncFixtures() {
-  for (const sport of ENABLED) {
-    const adapter = adapterFor(SPORTS[sport].provider);
-    let fixtures = [];
-    try { fixtures = await adapter.fetchFixtures({ sport, ...(SPORT_CFG[sport] || {}) }); }
-    catch (e) { console.warn(`[sync:${sport}] fixtures failed: ${e.message}`); continue; }
-
-    const normed = fixtures.map((f) => norm(f, sport));
-    db.transaction(() => normed.forEach((f) => upsertFixture.run(f)))();
-    console.log(`[sync:${sport}] ${normed.length} fixtures`);
-
-    const soon = normed.filter((f) => f.status === "upcoming" && f.kickoff && new Date(f.kickoff) - Date.now() < 48 * 3600e3);
-    for (const f of soon) {
-      try {
-        const odds = await adapter.fetchOdds({ id: f.id.split(":").slice(1).join(":") || f.id, raw: f.raw, sport });
-        odds.forEach((o) => upsertOdd.run({ fixture_id: f.id, market: o.market, option: o.option, price: o.price }));
-      } catch (e) { console.warn(`[sync:${sport}] odds failed ${f.id}: ${e.message}`); }
-    }
-  }
+  // Odds API removed — ORAKL is upload-driven. This is a no-op kept for compatibility.
+  return { synced: 0, source: "manual-upload" };
 }
 
 // —— 2. Generate AI picks ——
@@ -183,7 +166,7 @@ export async function settleManualFromScores() {
   pending.forEach((f) => (bySport[f.sport] = bySport[f.sport] || []).push(f));
   for (const sport of Object.keys(bySport)) {
     let list = [];
-    try { list = await theoddsapi.fetchScoresList(sport); } catch { continue; }
+    continue; // API removed — settle via type-the-score panel / results CSV
     if (!list.length) continue;
     const map = {};
     list.forEach((m) => { map[nrm(m.home) + "|" + nrm(m.away)] = m; map[nrm(m.away) + "|" + nrm(m.home)] = { ...m, flip: true }; });

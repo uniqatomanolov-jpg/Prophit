@@ -13,18 +13,18 @@
 // (Player props, cards, corners, spreads/other totals need extra feeds — removed
 //  until wired, so nothing shows a market it can't grade.)
 export const SPORTS = {
-  soccer:  { family: "h2h", provider: "theoddsapi", label: "Football", markets: ["x12", "ou25"] },
-  tennis:  { family: "h2h", provider: "theoddsapi", label: "Tennis",   markets: ["ml"] },
-  nba:     { family: "h2h", provider: "theoddsapi", label: "Basketball", markets: ["ml", "spread", "total"] },
-  nfl:     { family: "h2h", provider: "theoddsapi", label: "NFL",      markets: ["ml"] },
-  darts:   { family: "h2h", provider: "theoddsapi", label: "Darts",    markets: ["ml"] },
-  snooker: { family: "h2h", provider: "theoddsapi", label: "Snooker",  markets: ["result"] },
-  mlb:     { family: "h2h", provider: "theoddsapi", label: "Baseball", markets: ["ml"] },
-  nhl:     { family: "h2h", provider: "theoddsapi", label: "Ice Hockey", markets: ["ml"] },
-  mma:     { family: "h2h", provider: "theoddsapi", label: "MMA",      markets: ["ml"] },
-  cricket: { family: "h2h", provider: "theoddsapi", label: "Cricket",  markets: ["ml"] },
-  f1:      { family: "race", provider: "theoddsapi", label: "Formula 1", markets: ["winner", "podium"] },
-  motogp:  { family: "race", provider: "theoddsapi", label: "MotoGP",  markets: ["winner", "podium"] },
+  soccer:  { family: "h2h", provider: "manual", label: "Football", markets: ["x12", "ou25"] },
+  tennis:  { family: "h2h", provider: "manual", label: "Tennis",   markets: ["ml"] },
+  nba:     { family: "h2h", provider: "manual", label: "Basketball", markets: ["ml", "spread", "total"] },
+  nfl:     { family: "h2h", provider: "manual", label: "NFL",      markets: ["ml"] },
+  darts:   { family: "h2h", provider: "manual", label: "Darts",    markets: ["ml"] },
+  snooker: { family: "h2h", provider: "manual", label: "Snooker",  markets: ["result"] },
+  mlb:     { family: "h2h", provider: "manual", label: "Baseball", markets: ["ml"] },
+  nhl:     { family: "h2h", provider: "manual", label: "Ice Hockey", markets: ["ml"] },
+  mma:     { family: "h2h", provider: "manual", label: "MMA",      markets: ["ml"] },
+  cricket: { family: "h2h", provider: "manual", label: "Cricket",  markets: ["ml"] },
+  f1:      { family: "race", provider: "manual", label: "Formula 1", markets: ["winner", "podium"] },
+  motogp:  { family: "race", provider: "manual", label: "MotoGP",  markets: ["winner", "podium"] },
 };
 
 // Human-readable market metadata used to build the AI prompt per sport.
