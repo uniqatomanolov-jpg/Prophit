@@ -61,6 +61,49 @@ function dateFrom(dstr, tstr) {
   if (m && MONTHS[m[2].toLowerCase()]) return `${YEAR}-${pad(MONTHS[m[2].toLowerCase()])}-${pad(m[1])} ${t}`;
   return `${today()} ${t}`;
 }
+// ————————————————————————————————————————————————————————————————
+// DATA-INTEGRITY HELPERS (shared by every upload path)
+// A fixture without two real NAMES is not a fixture. A fixture without a
+// parseable kickoff is not schedulable. Both are rejected at the door so
+// junk can never reach the DB, the model, or the feed.
+// ————————————————————————————————————————————————————————————————
+const ODDS_LIKE = /^[+-]?\d{1,4}([.,]\d+)?$/;                 // "2.25", "1,615", "-110"
+const RESERVED_RX = /^(home|away|draw|over|under|yes|no|x|1|2|tbd|tba|n\/a|null|undefined|-|—)$/i;
+const LEAGUE_RX = /\b(division|eurobasket|euroleague|champions? league|premier league|la liga|serie [abc]|bundesliga|ligue ?1|conference|group [a-h]|round of|qualifier|regional|matchday|standings|matches tod)\b/i;
+
+export function isBadName(x) {
+  const v = String(x == null ? "" : x).trim();
+  if (!v) return true;                       // empty
+  if (ODDS_LIKE.test(v)) return true;        // a PRICE landed in a name column
+  if (!/[\p{L}]/u.test(v)) return true;      // no letters at all → not a name
+  if (v.replace(/[^\p{L}]/gu, "").length < 2) return true;  // "A." etc
+  if (RESERVED_RX.test(v)) return true;      // market label, not a competitor
+  if (LEAGUE_RX.test(v)) return true;        // league/section header row
+  if (v.length > 42) return true;
+  return false;
+}
+
+const KO_RX = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{1,2}):(\d{2})/;
+// Normalise anything we were given into "YYYY-MM-DD HH:MM", or null if unusable.
+export function normalizeKickoff(k) {
+  if (k == null || k === "") return null;
+  let s = String(k).trim();
+  let m = s.match(KO_RX);
+  if (!m) {
+    // last-resort formats: "18/07 20:00", "18/07/2026 20:00", "18 Jul 20:00"
+    const parts = s.split(/\s+/);
+    const guess = dateFrom(parts[0] || "", parts[1] || "");
+    m = String(guess).match(KO_RX);
+    if (!m) return null;
+  }
+  const out = `${m[1]}-${m[2]}-${m[3]} ${pad(m[4])}:${m[5]}`;
+  const t = Date.parse(out.replace(" ", "T"));
+  if (Number.isNaN(t)) return null;
+  // sanity window — a "fixture" 3 years ago or 3 years out is a parse error
+  const now = Date.now();
+  if (t < now - 30 * 24 * 3600e3 || t > now + 365 * 24 * 3600e3) return null;
+  return out;
+}
 const num = (x) => { const n = parseFloat(String(x).replace(",", ".")); return Number.isNaN(n) ? null : n; };
 const lineFrom = (label) => { const m = String(label).match(/-?\d+(\.\d+)?/); return m ? m[0] : ""; };
 
@@ -442,6 +485,23 @@ function normWebScraper(rows) {
   return out.length ? out : null;
 }
 
+// —— canonical 3-way / 2-way option labels ————————————————————————
+// Sources label the same selection five different ways ("1", "Palmeiras",
+// "Home", "HOME WIN"). The model answers in home/draw/away, so if the stored
+// label is a team name the price can never be matched back to the pick and the
+// card renders "Bookmaker line —" with no edge. Canonicalise at ingest.
+const THREE_WAY = new Set(["x12", "result", "corners_3way", "htr", "1x2"]);
+const nrmLbl = (x) => String(x == null ? "" : x).trim().toLowerCase();
+export function canonOption(market, option, home, away) {
+  const m = nrmLbl(market), o = nrmLbl(option);
+  if (!THREE_WAY.has(m)) return option;
+  const h = nrmLbl(home), a = nrmLbl(away);
+  if (o === "1" || o === "home" || o === "home win" || (h && o === h)) return "home";
+  if (o === "2" || o === "away" || o === "away win" || (a && o === a)) return "away";
+  if (o === "x" || o === "draw" || o === "tie" || o === "empate") return "draw";
+  return option;
+}
+
 export function ingestEvents(csvText) {
   const raw = splitRows(csvText);
   let rows = normWebScraperMarkets(raw) || normWebScraperBasket(raw) || normWebScraperPlayers(raw) || normWebScraper(raw) || normBG(raw) || normSpreadexList(raw) || normSpreadex(raw) || normBetanoMatch(raw) || normSimplePlayers(raw) || normEN(raw);
@@ -450,13 +510,41 @@ export function ingestEvents(csvText) {
   if (rows) rows = rows.filter((r) => String(r.sport).toLowerCase() !== "soccer" || KEEP_SOCCER.has(r.market));
   if (!rows) rows = parseCSV(csvText);
   // ---- GLOBAL DATA-INTEGRITY GATES (protect every upload source) ----
-  const LEAGUE_RX = /\b(division|eurobasket|euroleague|champions? league|premier league|la liga|serie [abc]|bundesliga|ligue ?1|conference|group [a-h]|round of|qualifier|regional|matchday|standings)\b/i;
-  const isHeaderName = (x) => { const v = String(x || "").trim(); return !v || LEAGUE_RX.test(v) || v.length > 42; };
+  const rejected = { noName: 0, badDate: 0, alreadyPlayed: 0, noOdds: 0, badMargin: 0 };
+  const STALE_MS = (Number(process.env.UPLOAD_GRACE_HOURS) || 6) * 3600e3;
   if (rows) {
-    // 1) drop fixtures whose team names are actually competition/league headers
-    rows = rows.filter((r) => !isHeaderName(r.home) || RACE_SPORTS.has(String(r.sport).toLowerCase()));
-    rows = rows.filter((r) => { const sp = String(r.sport).toLowerCase(); if (RACE_SPORTS.has(sp)) return true; return !isHeaderName(r.away); });
-    // 2) margin sanity: reject impossible 2-way markets (e.g. 1.10 vs 1.10 → 182% book).
+    // 1) NAMES: both competitors must be real names. A row whose "home"/"away"
+    //    is a price ("2.25"), a market label ("away") or a league header is a
+    //    column-misalignment in the source file — drop it, never store it.
+    rows = rows.filter((r) => {
+      const race = RACE_SPORTS.has(String(r.sport).toLowerCase());
+      const bad = isBadName(r.home) || (!race && isBadName(r.away));
+      if (bad) rejected.noName++;
+      return !bad;
+    });
+
+    // 2) DATES: every row gets a real, sane kickoff or it is dropped.
+    //    No more "Invalid Date" cards and no more games that can never expire.
+    rows = rows.filter((r) => {
+      const ko = normalizeKickoff(r.kickoff);
+      if (!ko) { rejected.badDate++; return false; }
+      // an EVENTS upload is for games that have not finished. Anything that
+      // kicked off more than the grace window ago is history — it belongs in a
+      // results upload, not on the live feed.
+      if (Date.parse(ko.replace(" ", "T")) < Date.now() - STALE_MS) { rejected.alreadyPlayed++; return false; }
+      r.kickoff = ko;
+      return true;
+    });
+
+    // 3) ODDS: a row with no usable price cannot produce an edge — it would create
+    //    a fixture that renders as "—" everywhere. Reject it here instead.
+    rows = rows.filter((r) => {
+      const price = typeof r.odds === "number" ? r.odds : num(r.odds);
+      if (price == null || !(price >= 1.01)) { rejected.noOdds++; return false; }
+      return true;
+    });
+
+    // 4) MARGIN sanity: reject impossible 2-way markets (e.g. 1.10 vs 1.10 → 182% book).
     //    Group a fixture+market's options, check implied-probability sum.
     const groups = {};
     for (const r of rows) { const k = manualId(r) + "|" + r.market; (groups[k] = groups[k] || []).push(r); }
@@ -465,11 +553,19 @@ export function ingestEvents(csvText) {
       const g = groups[k]; if (g.length < 2) continue;
       let sum = 0, ok = true;
       for (const r of g) { const o = typeof r.odds === "number" ? r.odds : num(r.odds); if (o == null || o < 1.01) { ok = false; break; } sum += 1 / o; }
-      // sum ~1.0 = fair; real books 1.02–1.25. Reject > 1.35 (absurd margin) or < 0.90 (arb/typo).
-      if (!ok || sum > 1.35 || sum < 0.90) bad.add(k);
+      // sum ~1.0 = fair; real books run 1.02–1.25. An absurd margin (>1.35) is always
+      // a parse error. A sum BELOW 1 only means "typo" when the book is complete —
+      // a 1X2 upload missing the draw leg legitimately sums under 1, so only apply
+      // the lower bound when we have the full set of options for the market.
+      const mkt = String(g[0].market || "").toLowerCase();
+      const expected = THREE_WAY.has(mkt) ? 3 : 2;
+      const complete = g.length >= expected;
+      if (!ok || sum > 1.35 || (complete && sum < 0.90)) bad.add(k);
     }
-    if (bad.size) rows = rows.filter((r) => !bad.has(manualId(r) + "|" + r.market));
+    if (bad.size) { const before = rows.length; rows = rows.filter((r) => !bad.has(manualId(r) + "|" + r.market)); rejected.badMargin = before - rows.length; }
   }
+  const rejectedTotal = rejected.noName + rejected.badDate + rejected.alreadyPlayed + rejected.noOdds + rejected.badMargin;
+  if (rejectedTotal) console.log(`[upload] rejected ${rejectedTotal} rows —`, rejected);
   const seen = new Set(); let fixtures = 0, odds = 0;
   // pre-pass: collect entrants for race events (drivers/riders = the options)
   const entrantsMap = {};
@@ -494,13 +590,14 @@ export function ingestEvents(csvText) {
           score: null, raw: JSON.stringify({ source: "manual" }) });
         seen.add(id); fixtures++;
       }
-      const option = r.line && !String(r.option).includes(String(r.line)) ? `${r.option} ${r.line}`.trim() : r.option;
+      let option = r.line && !String(r.option).includes(String(r.line)) ? `${r.option} ${r.line}`.trim() : r.option;
+      option = canonOption(r.market, option, r.home, r.away);
       const price = typeof r.odds === "number" ? r.odds : num(r.odds);
       if (option && price != null) { upsertOdd.run({ fixture_id: id, market: r.market, option, price }); odds++; }
     }
   });
   tx();
-  return { fixtures, odds, rows: rows.length };
+  return { fixtures, odds, rows: rows.length, rejected, rejectedTotal };
 }
 
 const norm = (x) => String(x).trim().toLowerCase();

@@ -13,7 +13,7 @@
 // (Player props, cards, corners, spreads/other totals need extra feeds — removed
 //  until wired, so nothing shows a market it can't grade.)
 export const SPORTS = {
-  soccer:  { family: "h2h", provider: "manual", label: "Football", markets: ["x12", "ou25"] },
+  soccer:  { family: "h2h", provider: "manual", label: "Football", markets: ["x12", "ou25", "btts", "corners_ou"] },
   tennis:  { family: "h2h", provider: "manual", label: "Tennis",   markets: ["ml"] },
   nba:     { family: "h2h", provider: "manual", label: "Basketball", markets: ["ml", "spread", "total"] },
   nfl:     { family: "h2h", provider: "manual", label: "NFL",      markets: ["ml"] },

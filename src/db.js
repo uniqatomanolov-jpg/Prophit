@@ -61,6 +61,7 @@ CREATE TABLE IF NOT EXISTS showdown_bets (
   pick TEXT,
   odds REAL,
   stake REAL,
+  reasoning TEXT,
   result TEXT DEFAULT 'pending',
   created_at TEXT DEFAULT (datetime('now'))
 );
@@ -91,7 +92,8 @@ CREATE TABLE IF NOT EXISTS outcomes (
 `);
 
 // safe migration — add value-betting columns if an older DB predates them
-for (const col of ["probability REAL", "edge REAL", "settled_odds REAL", "settled_fair_price REAL", "edge_at_placement REAL", "settled_at TEXT"]) {
+for (const col of ["probability REAL", "edge REAL", "settled_odds REAL", "settled_fair_price REAL", "edge_at_placement REAL", "settled_at TEXT", "closing_price REAL", "closing_at TEXT"]) {
+  void 0;
   try { db.exec(`ALTER TABLE picks ADD COLUMN ${col}`); } catch { /* already exists */ }
 }
 
@@ -130,10 +132,39 @@ export const q = {
   finishedUngraded: db.prepare(`
     SELECT DISTINCT f.* FROM fixtures f JOIN picks p ON p.fixture_id=f.id
     WHERE f.status='final' AND p.correct IS NULL`),
-  fixturesAll: db.prepare(`SELECT * FROM fixtures ORDER BY kickoff DESC LIMIT 200`),
+  fixturesAll: db.prepare(`SELECT * FROM fixtures ORDER BY kickoff DESC LIMIT 400`),
+  // Every positive-edge upcoming Claude pick, ALL sports, ranked by edge.
+  // Computed in SQL so the Value Board can never be truncated by a per-sport or
+  // row-count cap the way a "fetch the fixture list and filter" approach was.
+  valuePicks: db.prepare(`
+    SELECT f.id, f.sport, f.comp, f.home, f.away, f.kickoff,
+           p.market, p.pick, p.edge, p.probability, p.price, p.closing_price, p.reasoning
+      FROM picks p JOIN fixtures f ON f.id = p.fixture_id
+     WHERE p.model = 'claude' AND p.correct IS NULL AND p.edge IS NOT NULL AND p.edge > 0
+       AND f.status != 'final' AND f.kickoff IS NOT NULL
+       AND datetime(replace(f.kickoff,' ','T')) > datetime('now','-2 hours')
+     ORDER BY p.edge DESC LIMIT @limit`),
   fixturesBySport: db.prepare(`SELECT * FROM fixtures WHERE sport=@sport ORDER BY kickoff DESC LIMIT 100`),
   oddsFor: db.prepare(`SELECT market, option, price FROM odds WHERE fixture_id=?`),
-  picksFor: db.prepare(`SELECT model, market, pick, confidence, price, correct, reasoning, probability, edge FROM picks WHERE fixture_id=?`),
+  picksFor: db.prepare(`SELECT model, market, pick, confidence, price, correct, reasoning, probability, edge, closing_price FROM picks WHERE fixture_id=?`),
+  // —— CLV (closing line value) ————————————————————————
+  // The price still showing at kick-off is the closing line. Beating it is the
+  // strongest available evidence that an edge was real rather than lucky.
+  picksNeedingClose: db.prepare(`
+    SELECT p.fixture_id, p.model, p.market, p.pick, p.price, f.home, f.away
+      FROM picks p JOIN fixtures f ON f.id = p.fixture_id
+     WHERE p.closing_price IS NULL AND f.kickoff IS NOT NULL
+       AND datetime(replace(f.kickoff,' ','T')) <= datetime('now')
+       AND datetime(replace(f.kickoff,' ','T')) > datetime('now','-2 days')`),
+  setClosing: db.prepare(`UPDATE picks SET closing_price=@closing, closing_at=datetime('now')
+     WHERE fixture_id=@fixture_id AND model=@model AND market=@market`),
+  clvStats: db.prepare(`
+    SELECT COUNT(*) n, AVG((p.price / p.closing_price - 1.0) * 100.0) avg_clv,
+           SUM(CASE WHEN p.price > p.closing_price THEN 1 ELSE 0 END) beat
+      FROM picks p
+     WHERE p.model='claude' AND p.closing_price IS NOT NULL AND p.closing_price > 1
+       AND p.price IS NOT NULL AND p.price > 1
+       AND (@sport = 'all' OR EXISTS (SELECT 1 FROM fixtures f WHERE f.id=p.fixture_id AND f.sport=@sport))`),
   hasPicks: db.prepare(`SELECT COUNT(*) n FROM picks WHERE fixture_id=? AND model=?`),
   distinctMarkets: db.prepare(`
     SELECT DISTINCT p.market FROM picks p JOIN fixtures f ON f.id = p.fixture_id
@@ -141,7 +172,7 @@ export const q = {
   picksList: db.prepare(`
     SELECT p.fixture_id, f.sport, f.comp, f.home, f.away, f.kickoff, f.status, f.score,
            p.model, p.market, p.pick, p.confidence, p.price, p.reasoning, p.created_at,
-           p.correct, p.probability, p.edge, o.outcome
+           p.correct, p.probability, p.edge, p.closing_price, o.outcome
     FROM picks p
     JOIN fixtures f ON f.id = p.fixture_id
     LEFT JOIN outcomes o ON o.fixture_id = p.fixture_id AND o.market = p.market
@@ -174,7 +205,7 @@ export const q = {
   sdResetAll: db.prepare(`UPDATE showdown_models SET current_bankroll=100.0`),
   sdRounds: db.prepare(`SELECT * FROM showdown_rounds ORDER BY id DESC`),
   sdNewRound: db.prepare(`INSERT INTO showdown_rounds (label) VALUES (@label)`),
-  sdAddBet: db.prepare(`INSERT INTO showdown_bets (model_id, round_id, event, market, pick, odds, stake) VALUES (@model_id,@round_id,@event,@market,@pick,@odds,@stake)`),
+  sdAddBet: db.prepare(`INSERT INTO showdown_bets (model_id, round_id, event, market, pick, odds, stake, reasoning) VALUES (@model_id,@round_id,@event,@market,@pick,@odds,@stake,@reasoning)`),
   sdBets: db.prepare(`SELECT b.*, m.name AS model FROM showdown_bets b JOIN showdown_models m ON m.id=b.model_id ORDER BY b.id DESC`),
   sdBetById: db.prepare(`SELECT * FROM showdown_bets WHERE id=@id`),
   sdSetBet: db.prepare(`UPDATE showdown_bets SET result=@result WHERE id=@id`),
@@ -218,6 +249,7 @@ export const q = {
       COALESCE(p.settled_odds, p.price) AS price,
       p.probability,
       COALESCE(p.edge_at_placement, p.edge) AS edge,
+      p.closing_price, p.reasoning,
       p.correct, p.settled_at
     FROM picks p JOIN fixtures f ON f.id=p.fixture_id
     WHERE p.model='claude' AND p.correct IS NOT NULL AND (@sport='all' OR f.sport=@sport)
@@ -234,6 +266,8 @@ export const q = {
       AND (@market = 'all' OR p.market = @market)
     GROUP BY p.model ORDER BY accuracy DESC`),
 };
+
+try { db.exec("ALTER TABLE showdown_bets ADD COLUMN reasoning TEXT"); } catch { /* exists */ }
 
 // seed the 4 AI competitors once
 ["Grok","ChatGPT","Gemini","Claude"].forEach((name)=>{ try { q.sdSeed.run({ name }); } catch {} });

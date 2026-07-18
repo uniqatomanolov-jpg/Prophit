@@ -6,6 +6,7 @@ import { adapterFor } from "./providers/index.js";
 import { buildPrompt } from "./providers/models.js";
 import { activeProviders } from "./providers/models.js";
 import { settleH2H, settleRace, isPickCorrect } from "./settle.js";
+import { isBadName } from "./uploads.js";
 
 // Per-sport feed config from env. Extend as you wire real feeds.
 // Soccer uses API-Football leagues; other sports pass through whatever their adapter needs.
@@ -64,16 +65,37 @@ export async function generatePicks() {
     const windowMs = (Number(process.env.PREDICT_WINDOW_HOURS) || 168) * 3600e3;
     const isManual = String(f.id).startsWith("manual:");
     if (!isManual && (!f.kickoff || dt <= 0 || dt > windowMs)) continue;
+    // Never spend a model call on garbage or on a game that has already been played.
+    // (Manual uploads used to be exempt from the time check — that is how finished
+    //  games kept getting re-priced and kept showing on the feed.)
+    if (isBadName(f.home) || (f.away && isBadName(f.away))) continue;
+    if (!f.kickoff || dt < -(Number(process.env.PREDICT_GRACE_HOURS) || 2) * 3600e3) continue;
 
     const odds = q.oddsFor.all(f.id);
-    const priceOf = (market, pick) => {
+    // Resolve a model pick to a stored price. Handles the label drift between
+    // sources and the model: "away" ↔ the away team's name ↔ "2", "Under" ↔ "under 2.5".
+    const aliases = (pick) => {
       const b = String(pick).toLowerCase().trim();
-      const hit = odds.find((o) => {
-        if (o.market !== market) return false;
+      const h = String(f.home || "").toLowerCase().trim(), a = String(f.away || "").toLowerCase().trim();
+      const out = new Set([b]);
+      if (b === "home" || (h && b === h)) { out.add("home"); out.add("1"); if (h) out.add(h); }
+      if (b === "away" || (a && b === a)) { out.add("away"); out.add("2"); if (a) out.add(a); }
+      if (b === "draw" || b === "x" || b === "tie") { out.add("draw"); out.add("x"); out.add("tie"); }
+      return [...out];
+    };
+    const priceOf = (market, pick) => {
+      const cands = aliases(pick);
+      const pool = odds.filter((o) => o.market === market);
+      for (const c of cands) {                          // exact label first
+        const hit = pool.find((o) => o.option.toLowerCase().trim() === c);
+        if (hit) return hit.price;
+      }
+      const b = String(pick).toLowerCase().trim();
+      const loose = pool.find((o) => {                  // then substring ("Under" ↔ "under 2.5")
         const a = o.option.toLowerCase().trim();
-        return a.includes(b) || b.includes(a);          // "Under" ↔ "under 2.5"
+        return a.includes(b) || b.includes(a);
       });
-      return hit ? hit.price : null;
+      return loose ? loose.price : null;
     };
     // markets to predict = sport defaults ∪ any markets present in this fixture's odds (uploaded)
     const sportMarkets = SPORTS[f.sport]?.markets || [];
@@ -193,7 +215,41 @@ export async function settleManualFromScores() {
 }
 
 // —— 3. Grade finished events ——
+// —— CLV capture ————————————————————————————————————————
+// At kick-off the last price we hold IS the closing line. Snapshot it once per
+// pick so accuracy can be measured against the market, not just against results.
+export function snapshotClosingLines() {
+  const pending = q.picksNeedingClose.all();
+  let n = 0;
+  for (const p of pending) {
+    const odds = q.oddsFor.all(p.fixture_id).filter((o) => o.market === p.market);
+    if (!odds.length) continue;
+    const b = String(p.pick).toLowerCase().trim();
+    const h = String(p.home || "").toLowerCase().trim(), a = String(p.away || "").toLowerCase().trim();
+    const want = new Set([b]);
+    if (b === "home" || (h && b === h)) { want.add("home"); want.add("1"); if (h) want.add(h); }
+    if (b === "away" || (a && b === a)) { want.add("away"); want.add("2"); if (a) want.add(a); }
+    if (b === "draw" || b === "x") { want.add("draw"); want.add("x"); }
+    let hit = odds.find((o) => want.has(o.option.toLowerCase().trim()));
+    if (!hit) hit = odds.find((o) => { const x = o.option.toLowerCase().trim(); return x.includes(b) || b.includes(x); });
+    if (!hit || !(hit.price > 1)) continue;
+    q.setClosing.run({ closing: hit.price, fixture_id: p.fixture_id, model: p.model, market: p.market });
+    n++;
+  }
+  if (n) console.log(`[clv] captured ${n} closing lines`);
+  return n;
+}
+
 export async function gradeFinished() {
+  snapshotClosingLines();                  // must happen before results overwrite anything
+  // 1) results feed (if a key is configured) settles finished games by name match
+  try {
+    const { autoSettle, resultsFeedStatus } = await import("./results.js");
+    if (resultsFeedStatus().enabled) {
+      const r = await autoSettle({});
+      console.log(`[grade] auto-settle: ${r.settled} games, ${r.graded} picks graded` + (r.unmatchedCount ? `, ${r.unmatchedCount} unmatched` : ""));
+    }
+  } catch (e) { console.warn("[grade] auto-settle failed:", e.message); }
   await settleManualFromScores();          // manual games settle themselves by score
   await syncFixtures(); // refresh statuses
   for (const f of q.finishedUngraded.all()) {
