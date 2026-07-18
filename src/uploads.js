@@ -449,6 +449,27 @@ export function ingestEvents(csvText) {
   const KEEP_SOCCER = new Set(["x12", "goals_ou", "ou25", "goals_ou_1h", "btts", "dc", "corners_3way", "corners_ou"]);
   if (rows) rows = rows.filter((r) => String(r.sport).toLowerCase() !== "soccer" || KEEP_SOCCER.has(r.market));
   if (!rows) rows = parseCSV(csvText);
+  // ---- GLOBAL DATA-INTEGRITY GATES (protect every upload source) ----
+  const LEAGUE_RX = /\b(division|eurobasket|euroleague|champions? league|premier league|la liga|serie [abc]|bundesliga|ligue ?1|conference|group [a-h]|round of|qualifier|regional|matchday|standings)\b/i;
+  const isHeaderName = (x) => { const v = String(x || "").trim(); return !v || LEAGUE_RX.test(v) || v.length > 42; };
+  if (rows) {
+    // 1) drop fixtures whose team names are actually competition/league headers
+    rows = rows.filter((r) => !isHeaderName(r.home) || RACE_SPORTS.has(String(r.sport).toLowerCase()));
+    rows = rows.filter((r) => { const sp = String(r.sport).toLowerCase(); if (RACE_SPORTS.has(sp)) return true; return !isHeaderName(r.away); });
+    // 2) margin sanity: reject impossible 2-way markets (e.g. 1.10 vs 1.10 → 182% book).
+    //    Group a fixture+market's options, check implied-probability sum.
+    const groups = {};
+    for (const r of rows) { const k = manualId(r) + "|" + r.market; (groups[k] = groups[k] || []).push(r); }
+    const bad = new Set();
+    for (const k in groups) {
+      const g = groups[k]; if (g.length < 2) continue;
+      let sum = 0, ok = true;
+      for (const r of g) { const o = typeof r.odds === "number" ? r.odds : num(r.odds); if (o == null || o < 1.01) { ok = false; break; } sum += 1 / o; }
+      // sum ~1.0 = fair; real books 1.02–1.25. Reject > 1.35 (absurd margin) or < 0.90 (arb/typo).
+      if (!ok || sum > 1.35 || sum < 0.90) bad.add(k);
+    }
+    if (bad.size) rows = rows.filter((r) => !bad.has(manualId(r) + "|" + r.market));
+  }
   const seen = new Set(); let fixtures = 0, odds = 0;
   // pre-pass: collect entrants for race events (drivers/riders = the options)
   const entrantsMap = {};
