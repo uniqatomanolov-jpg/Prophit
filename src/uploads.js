@@ -511,6 +511,7 @@ export function ingestEvents(csvText) {
   if (!rows) rows = parseCSV(csvText);
   // ---- GLOBAL DATA-INTEGRITY GATES (protect every upload source) ----
   const rejected = { noName: 0, badDate: 0, alreadyPlayed: 0, noOdds: 0, badMargin: 0 };
+  const assumed = { date: 0 };
   const STALE_MS = (Number(process.env.UPLOAD_GRACE_HOURS) || 6) * 3600e3;
   if (rows) {
     // 1) NAMES: both competitors must be real names. A row whose "home"/"away"
@@ -527,7 +528,16 @@ export function ingestEvents(csvText) {
     //    No more "Invalid Date" cards and no more games that can never expire.
     rows = rows.filter((r) => {
       const ko = normalizeKickoff(r.kickoff);
-      if (!ko) { rejected.badDate++; return false; }
+      if (!ko) {
+        // No readable date. A bookmaker screenshot often shows only players and
+        // prices — dropping those would throw the whole upload away, which is
+        // worse than scheduling them for the next slot today. They are flagged,
+        // reported back to the uploader, and age out of the feed normally.
+        r.kickoff = futureSlot();
+        r.dateAssumed = true;
+        assumed.date++;
+        return true;
+      }
       // an EVENTS upload is for games that have not finished. Anything that
       // kicked off more than the grace window ago is history — it belongs in a
       // results upload, not on the live feed.
@@ -566,6 +576,7 @@ export function ingestEvents(csvText) {
   }
   const rejectedTotal = rejected.noName + rejected.badDate + rejected.alreadyPlayed + rejected.noOdds + rejected.badMargin;
   if (rejectedTotal) console.log(`[upload] rejected ${rejectedTotal} rows —`, rejected);
+  if (assumed.date) console.log(`[upload] ${assumed.date} rows had no readable date — scheduled for ${futureSlot()}`);
   const seen = new Set(); let fixtures = 0, odds = 0;
   // pre-pass: collect entrants for race events (drivers/riders = the options)
   const entrantsMap = {};
@@ -597,7 +608,7 @@ export function ingestEvents(csvText) {
     }
   });
   tx();
-  return { fixtures, odds, rows: rows.length, rejected, rejectedTotal };
+  return { fixtures, odds, rows: rows.length, rejected, rejectedTotal, assumed };
 }
 
 const norm = (x) => String(x).trim().toLowerCase();
