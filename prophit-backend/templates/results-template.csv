@@ -1,0 +1,5 @@
+sport,kickoff,home,away,market,outcome,score
+soccer,2026-08-01 15:00,Arsenal,Chelsea,x12,home,2-1
+soccer,2026-08-01 15:00,Arsenal,Chelsea,btts,Yes,2-1
+soccer,2026-08-01 15:00,Arsenal,Chelsea,corners,Over 9.5,2-1
+tennis,2026-08-01 12:00,Alcaraz,Sinner,ml,Alcaraz,2-0

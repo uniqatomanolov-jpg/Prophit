@@ -1,0 +1,23 @@
+{
+  "name": "prophit-backend",
+  "version": "0.1.0",
+  "description": "AI vs the bookies — pulls live fixtures/odds, generates AI picks across markets, grades results",
+  "type": "module",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "sync": "node -e \"import('./src/jobs.js').then(m => m.syncFixtures())\"",
+    "predict": "node -e \"import('./src/jobs.js').then(m => m.generatePicks())\"",
+    "grade": "node -e \"import('./src/jobs.js').then(m => m.gradeFinished())\""
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.3.0",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "node-cron": "^3.0.3",
+    "stripe": "^16.12.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
