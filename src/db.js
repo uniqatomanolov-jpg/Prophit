@@ -38,6 +38,32 @@ CREATE TABLE IF NOT EXISTS users (
   subscription_tier TEXT DEFAULT 'free',
   created_at TEXT DEFAULT (datetime('now'))
 );
+CREATE TABLE IF NOT EXISTS showdown_models (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT UNIQUE,
+  starting_bankroll REAL DEFAULT 100.0,
+  current_bankroll REAL DEFAULT 100.0,
+  status TEXT DEFAULT 'active',
+  created_at TEXT DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS showdown_rounds (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  label TEXT,
+  status TEXT DEFAULT 'open',
+  created_at TEXT DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS showdown_bets (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  model_id INTEGER,
+  round_id INTEGER,
+  event TEXT,
+  market TEXT,
+  pick TEXT,
+  odds REAL,
+  stake REAL,
+  result TEXT DEFAULT 'pending',
+  created_at TEXT DEFAULT (datetime('now'))
+);
 CREATE TABLE IF NOT EXISTS compounding_runs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT DEFAULT 'Run to a Million',
@@ -141,6 +167,18 @@ export const q = {
     WHERE p.model='claude' AND p.correct IS NOT NULL
     GROUP BY f.sport HAVING COUNT(*) >= 1 ORDER BY roi DESC`),
   cmpActiveRun: db.prepare(`SELECT * FROM compounding_runs WHERE status='active' ORDER BY id DESC LIMIT 1`),
+  sdModels: db.prepare(`SELECT * FROM showdown_models ORDER BY current_bankroll DESC, name ASC`),
+  sdModelByName: db.prepare(`SELECT * FROM showdown_models WHERE name=@name`),
+  sdSeed: db.prepare(`INSERT OR IGNORE INTO showdown_models (name) VALUES (@name)`),
+  sdSetBank: db.prepare(`UPDATE showdown_models SET current_bankroll=@bank WHERE id=@id`),
+  sdResetAll: db.prepare(`UPDATE showdown_models SET current_bankroll=100.0`),
+  sdRounds: db.prepare(`SELECT * FROM showdown_rounds ORDER BY id DESC`),
+  sdNewRound: db.prepare(`INSERT INTO showdown_rounds (label) VALUES (@label)`),
+  sdAddBet: db.prepare(`INSERT INTO showdown_bets (model_id, round_id, event, market, pick, odds, stake) VALUES (@model_id,@round_id,@event,@market,@pick,@odds,@stake)`),
+  sdBets: db.prepare(`SELECT b.*, m.name AS model FROM showdown_bets b JOIN showdown_models m ON m.id=b.model_id ORDER BY b.id DESC`),
+  sdBetById: db.prepare(`SELECT * FROM showdown_bets WHERE id=@id`),
+  sdSetBet: db.prepare(`UPDATE showdown_bets SET result=@result WHERE id=@id`),
+  sdBetsForRound: db.prepare(`SELECT * FROM showdown_bets WHERE round_id=@round AND result='pending'`),
   userByEmail: db.prepare(`SELECT * FROM users WHERE email=@email`),
   userByCustomer: db.prepare(`SELECT * FROM users WHERE stripe_customer_id=@cid`),
   userUpsert: db.prepare(`INSERT INTO users (email, stripe_customer_id, stripe_subscription_id, subscription_status, subscription_tier)
@@ -196,3 +234,6 @@ export const q = {
       AND (@market = 'all' OR p.market = @market)
     GROUP BY p.model ORDER BY accuracy DESC`),
 };
+
+// seed the 4 AI competitors once
+["Grok","ChatGPT","Gemini","Claude"].forEach((name)=>{ try { q.sdSeed.run({ name }); } catch {} });
