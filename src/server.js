@@ -13,7 +13,7 @@ function predictSoon() {
   generatePicks().catch((e) => console.error("[auto-predict]", e.message)).finally(() => { predictBusy = false; });
 }
 import { ingestEvents, ingestResults } from "./uploads.js";
- 
+
 const app = express();
 // Stripe webhook needs the raw body for signature verification — mount BEFORE json parser.
 app.post("/api/stripe/webhook", express.raw({ type: "application/json" }), async (req, res) => {
@@ -29,7 +29,7 @@ app.use((req, res, next) => {
   if (req.method === "OPTIONS") return res.sendStatus(204);
   next();
 });
- 
+
 // —— API for the React frontend ——————————————————
 app.get("/api/fixtures", (req, res) => {
   const base = req.query.sport ? q.fixturesBySport.all({ sport: req.query.sport }) : q.fixturesAll.all();
@@ -41,7 +41,7 @@ app.get("/api/fixtures", (req, res) => {
   }));
   res.json(fixtures);
 });
- 
+
 app.get("/api/leaderboard", (req, res) => {
   const sport = req.query.sport || "all";
   const rows = q.leaderboard.all({ sport, market: req.query.market || "all" });
@@ -57,7 +57,7 @@ app.get("/api/leaderboard", (req, res) => {
     form: form[r.model] || [],
   })));
 });
- 
+
 // —— /api/picks — each model's pick, confidence, reasoning, timestamp, and result ——
 // query params: sport, model, status (all|open|settled), limit
 app.get("/api/picks", (req, res) => {
@@ -86,9 +86,9 @@ app.get("/api/picks", (req, res) => {
     result: r.correct == null ? "pending" : r.correct ? "win" : "loss",
   })));
 });
- 
+
 app.get("/api/billing/status", (_, res) => res.json({ enabled: billingEnabled() }));
- 
+
 app.post("/api/stripe/create-checkout-session", async (req, res) => {
   try {
     if (!billingEnabled()) return res.status(503).json({ error: "billing not configured yet" });
@@ -96,9 +96,9 @@ app.post("/api/stripe/create-checkout-session", async (req, res) => {
     res.json({ url });
   } catch (e) { console.error("[checkout]", e.message); res.status(400).json({ error: e.message }); }
 });
- 
+
 app.get("/api/health", (_, res) => res.json({ ok: true }));
- 
+
 // External-cron endpoint: wakes the server and runs the full cycle.
 // Point a free pinger (e.g. cron-job.org) at GET /api/cron every few hours.
 let cronBusy = false;
@@ -113,7 +113,7 @@ app.get("/api/cron", async (_, res) => {
   } catch (e) { console.error("[cron]", e.message); }
   finally { cronBusy = false; }
 });
- 
+
 // Claude's real track record vs the bookies: headline stats, P&L curve, receipts.
 app.get("/api/track", (req, res) => {
   const sport = req.query.sport || "all";
@@ -143,16 +143,16 @@ app.get("/api/track", (req, res) => {
     bySport: (sport === "all") ? q.bySport.all() : [],
   });
 });
- 
+
 // distinct markets present (for the per-market leaderboard selector)
 app.get("/api/sports", (_, res) => {
   res.json(q.distinctSports.all().map((r) => r.sport));
 });
- 
+
 app.get("/api/markets", (req, res) => {
   res.json(q.distinctMarkets.all({ sport: req.query.sport || "all" }).map((r) => r.market));
 });
- 
+
 // per-market leaderboard breakdown in one call: { market: rows[] }
 app.get("/api/leaderboard/breakdown", (req, res) => {
   const sport = req.query.sport || "all";
@@ -161,14 +161,14 @@ app.get("/api/leaderboard/breakdown", (req, res) => {
   for (const m of markets) out[m] = q.leaderboard.all({ sport, market: m });
   res.json(out);
 });
- 
+
 // —— CSV upload (admin-only when ADMIN_KEY is set in the environment) ——
 const requireAdmin = (req, res, next) => {
   const key = process.env.ADMIN_KEY;
   if (key && req.get("x-admin-key") !== key) return res.status(401).json({ error: "invalid admin key" });
   next();
 };
- 
+
 // ===== AI SHOWDOWN: 4 models, €100 each, manage their own bankroll =====
 function showdownView() {
   const models = q.sdModels.all();
@@ -181,14 +181,14 @@ function showdownView() {
   const leaderboard = Object.values(byModel).sort((a, b) => b.current_bankroll - a.current_bankroll);
   return { leaderboard, rounds: q.sdRounds.all(), bets };
 }
- 
+
 app.get("/api/showdown", (_, res) => res.json(showdownView()));
- 
+
 app.post("/api/showdown/round", requireAdmin, (req, res) => {
   q.sdNewRound.run({ label: req.body?.label || ("Round " + new Date().toISOString().slice(0, 10)) });
   res.json(showdownView());
 });
- 
+
 app.post("/api/showdown/bet", requireAdmin, (req, res) => {
   const { model, event, market, pick, odds, stake, reasoning, round_id } = req.body || {};
   const m = q.sdModelByName.get({ name: model });
@@ -200,7 +200,7 @@ app.post("/api/showdown/bet", requireAdmin, (req, res) => {
   q.sdAddBet.run({ model_id: m.id, round_id: round, event, market, pick, odds: Number(odds), stake: Number(stake), reasoning: reasoning || null });
   res.json(showdownView());
 });
- 
+
 app.post("/api/showdown/settle", requireAdmin, (req, res) => {
   const { id, result } = req.body || {};   // settle ONE bet: win | loss | void
   const b = q.sdBetById.get({ id: Number(id) });
@@ -214,16 +214,16 @@ app.post("/api/showdown/settle", requireAdmin, (req, res) => {
   q.sdSetBet.run({ id: b.id, result });
   res.json(showdownView());
 });
- 
+
 app.post("/api/showdown/reset", requireAdmin, (_, res) => {
   db.prepare("DELETE FROM showdown_bets").run();
   db.prepare("DELETE FROM showdown_rounds").run();
   q.sdResetAll.run();
   res.json(showdownView());
 });
- 
- 
- 
+
+
+
 // ===== MISSION: €100 → €1,000,000 compounding challenge =====
 const KELLY_MULT = Number(process.env.KELLY_MULT) || 0.25;   // quarter-Kelly
 function kellyStake(bankroll, odds, fairOdds) {
@@ -243,9 +243,9 @@ function runView(run) {
   return { ...run, level: lvl + 1, nextTarget: MILESTONES[Math.min(lvl + 1, MILESTONES.length - 1)],
     levelFloor: MILESTONES[lvl], bets };
 }
- 
+
 app.get("/api/compounding/run/active", (_, res) => res.json(runView(q.cmpActiveRun.get()) || { none: true }));
- 
+
 app.post("/api/compounding/run", requireAdmin, (req, res) => {
   q.cmpArchiveAll.run();
   const bank = Number(req.body?.starting_bankroll) || 100;
@@ -253,7 +253,7 @@ app.post("/api/compounding/run", requireAdmin, (req, res) => {
   q.cmpNewRun.run({ name, bank });
   res.json(runView(q.cmpActiveRun.get()));
 });
- 
+
 app.post("/api/compounding/bet", requireAdmin, (req, res) => {
   const run = q.cmpActiveRun.get();
   if (!run) return res.status(400).json({ error: "no active run — start one first" });
@@ -265,7 +265,7 @@ app.post("/api/compounding/bet", requireAdmin, (req, res) => {
   q.cmpAddBet.run({ run: run.id, fid: fixture_id, market, option, odds: Number(odds), stake });
   res.json(runView(q.cmpActiveRun.get()));
 });
- 
+
 app.post("/api/compounding/settle", requireAdmin, (req, res) => {
   const { id, result } = req.body || {};   // result: 'win' | 'loss'
   const run = q.cmpActiveRun.get();
@@ -273,12 +273,12 @@ app.post("/api/compounding/settle", requireAdmin, (req, res) => {
   settleCompoundingBet(Number(id), result, run);
   res.json(runView(q.cmpActiveRun.get()));
 });
- 
- 
+
+
 // POST the CSV text with Content-Type: text/csv
 // finished-but-unsettled games (for the manual settle panel)
 app.get("/api/unsettled", requireAdmin, (_, res) => res.json(q.unsettledPast.all()));
- 
+
 // Admin: delete one fixture (and its picks/odds) — for junk rows or long-finished games
 app.post("/api/fixture/delete", requireAdmin, (req, res) => {
   const { id } = req.body || {};
@@ -288,7 +288,7 @@ app.post("/api/fixture/delete", requireAdmin, (req, res) => {
   const r = db.prepare("DELETE FROM fixtures WHERE id=?").run(id);
   res.json({ ok: true, deleted: r.changes });
 });
- 
+
 // Admin: clear ALL past-dated unsettled manual games (junk/finished leftovers). Deletes their picks.
 app.post("/api/clear-finished", requireAdmin, (_, res) => {
   const rows = q.unsettledPast.all();
@@ -301,7 +301,7 @@ app.post("/api/clear-finished", requireAdmin, (_, res) => {
   console.log(`[clear-finished] deleted ${n} games`);
   res.json({ ok: true, deleted: n });
 });
- 
+
 // One-click rescue: any manual game whose (guessed) kickoff slipped into the past but was never
 // settled gets bumped to the next evening slot → back on the Live Feed, out of the settle queue.
 app.post("/api/fix-dates", requireAdmin, (_, res) => {
@@ -317,7 +317,7 @@ app.post("/api/fix-dates", requireAdmin, (_, res) => {
   console.log(`[fix-dates] moved ${r.changes} games to ${k}`);
   res.json({ ok: true, moved: r.changes, kickoff: k });
 });
- 
+
 // settle one game by typing the final score — grades every score-derivable pick
 app.post("/api/settle", requireAdmin, (req, res) => {
   try {
@@ -336,7 +336,7 @@ app.post("/api/settle", requireAdmin, (req, res) => {
     res.json({ ok: true, score: `${H}-${A}`, graded, skipped });
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
- 
+
 app.post("/api/upload-screenshot", requireAdmin, async (req, res) => {
   try {
     let { image, mediaType } = req.body || {};
@@ -348,7 +348,7 @@ app.post("/api/upload-screenshot", requireAdmin, async (req, res) => {
     if (out.fixtures > 0) { console.log("[screenshot] auto-predicting…"); predictSoon(); }
   } catch (e) { console.error("[screenshot]", e.message); res.status(400).json({ error: e.message }); }
 });
- 
+
 app.post("/api/upload/events", requireAdmin, (req, res) => {
   try {
     const result = ingestEvents(req.body || "");
@@ -361,16 +361,15 @@ app.post("/api/upload/results", requireAdmin, (req, res) => {
   try { res.json(ingestResults(req.body || "")); }
   catch (e) { res.status(400).json({ error: e.message }); }
 });
- 
+
 // manual job triggers (protect these behind auth before going public)
 app.post("/api/jobs/sync", async (_, res) => { res.json({ ok: true, note: "upload-driven; no external sync" }); });
 app.post("/api/jobs/predict", async (_, res) => { await generatePicks(); res.json({ ok: true }); });
 app.post("/api/jobs/grade", async (_, res) => { await gradeFinished(); res.json({ ok: true }); });
- 
+
 // —— schedule ————————————————————————————————————
 cron.schedule("30 */6 * * *", () => generatePicks().catch(console.error)); // picks after each sync
 cron.schedule("*/30 * * * *", () => gradeFinished().catch(console.error)); // grade every 30 min
- 
+
 const port = process.env.PORT || 3001;
 app.listen(port, () => console.log(`Prophit backend on :${port}`));
- 
