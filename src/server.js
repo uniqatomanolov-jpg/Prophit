@@ -191,7 +191,7 @@ app.get("/api/health", (_, res) => res.json({ ok: true }));
 // instead the UI reads these flags and says exactly what's missing.
 const BUILD = "2026-07-18";
 const CAPABILITIES = ["mission-auto", "auto-settle", "purge-junk", "reset", "showdown-bulk", "feed-hygiene", "value-board"];
-app.get("/api/version", (_, res) => res.json({ build: BUILD, capabilities: CAPABILITIES }));
+app.get("/api/version", (_, res) => res.json({ build: BUILD, capabilities: CAPABILITIES, resetOnBoot: process.env.RESET_ON_BOOT || null }));
 
 // External-cron endpoint: wakes the server and runs the full cycle.
 // Point a free pinger (e.g. cron-job.org) at GET /api/cron every few hours.
@@ -518,9 +518,7 @@ app.post("/api/settle/auto", requireAdmin, async (req, res) => {
 // scope: "record"   → wipe picks + outcomes (track record starts clean, fixtures stay)
 //        "fixtures" → wipe fixtures + odds + picks + outcomes (feed starts clean)
 //        "all"      → everything above plus mission + showdown bets
-app.post("/api/reset", requireAdmin, (req, res) => {
-  const scope = String(req.body?.scope || "");
-  if (!["record", "fixtures", "all"].includes(scope)) return res.status(400).json({ error: 'scope must be record | fixtures | all' });
+export function wipeData(scope) {
   const wiped = {};
   const del = (sql, label) => { wiped[label] = db.prepare(sql).run().changes; };
   db.transaction(() => {
@@ -538,7 +536,13 @@ app.post("/api/reset", requireAdmin, (req, res) => {
     }
   })();
   console.log(`[reset] scope=${scope}`, wiped);
-  res.json({ ok: true, scope, wiped });
+  return wiped;
+}
+
+app.post("/api/reset", requireAdmin, (req, res) => {
+  const scope = String(req.body?.scope || "");
+  if (!["record", "fixtures", "all"].includes(scope)) return res.status(400).json({ error: 'scope must be record | fixtures | all' });
+  res.json({ ok: true, scope, wiped: wipeData(scope) });
 });
 
 // settle one game by typing the final score — grades every score-derivable pick
@@ -595,4 +599,21 @@ cron.schedule("30 */6 * * *", () => generatePicks().catch(console.error)); // pi
 cron.schedule("*/30 * * * *", () => gradeFinished().catch(console.error)); // grade every 30 min
 
 const port = process.env.PORT || 3001;
+// FRESH START ON DEPLOY
+// Set RESET_ON_BOOT=record|fixtures|all in the host env and redeploy: the wipe runs
+// before the server accepts traffic. This is the way to clear data on a host whose
+// deployed build is too old to expose /api/reset — the same deploy that ships the
+// new code also clears the record.
+// REMOVE THE VAR AFTERWARDS or every future deploy wipes again (the UI warns you).
+const RESET_ON_BOOT = String(process.env.RESET_ON_BOOT || "").trim();
+if (RESET_ON_BOOT) {
+  if (["record", "fixtures", "all"].includes(RESET_ON_BOOT)) {
+    console.log(`[boot] RESET_ON_BOOT=${RESET_ON_BOOT} — wiping before startup`);
+    console.log("[boot] wiped:", wipeData(RESET_ON_BOOT));
+    console.log("[boot] \u26a0 remove RESET_ON_BOOT from your env now, or the next deploy wipes again");
+  } else {
+    console.warn(`[boot] RESET_ON_BOOT="${RESET_ON_BOOT}" is not one of record|fixtures|all — ignoring`);
+  }
+}
+
 app.listen(port, () => console.log(`Prophit backend on :${port}`));

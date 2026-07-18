@@ -91,10 +91,31 @@ CREATE TABLE IF NOT EXISTS outcomes (
 );
 `);
 
-// safe migration — add value-betting columns if an older DB predates them
-for (const col of ["probability REAL", "edge REAL", "settled_odds REAL", "settled_fair_price REAL", "edge_at_placement REAL", "settled_at TEXT", "closing_price REAL", "closing_at TEXT"]) {
-  void 0;
-  try { db.exec(`ALTER TABLE picks ADD COLUMN ${col}`); } catch { /* already exists */ }
+// ————————————————————————————————————————————————————————————————
+// MIGRATIONS — must run BEFORE any db.prepare() below.
+// CREATE TABLE IF NOT EXISTS never alters an existing table, so a database
+// created by an older build keeps its old columns. Preparing a statement that
+// names a missing column throws at import time and the process exits 1 — which
+// is exactly how a deploy dies with "table X has no column named Y".
+// Every column added after the first release belongs in this list.
+// ————————————————————————————————————————————————————————————————
+const MIGRATIONS = {
+  picks: ["probability REAL", "edge REAL", "settled_odds REAL", "settled_fair_price REAL",
+          "edge_at_placement REAL", "settled_at TEXT", "closing_price REAL", "closing_at TEXT"],
+  showdown_bets: ["reasoning TEXT"],
+  fixtures: ["entrants TEXT"],
+  compounding_bets: ["fair_price REAL", "settled_at TEXT"],
+};
+for (const [table, cols] of Object.entries(MIGRATIONS)) {
+  let have;
+  try { have = new Set(db.prepare(`PRAGMA table_info(${table})`).all().map((r) => r.name)); }
+  catch { continue; }                                   // table doesn't exist yet — CREATE made it current
+  for (const col of cols) {
+    const name = col.split(/\s+/)[0];
+    if (have.has(name)) continue;
+    try { db.exec(`ALTER TABLE ${table} ADD COLUMN ${col}`); console.log(`[migrate] ${table}.${name} added`); }
+    catch (e) { console.warn(`[migrate] ${table}.${name} failed: ${e.message}`); }
+  }
 }
 
 export const upsertFixture = db.prepare(`
@@ -267,7 +288,7 @@ export const q = {
     GROUP BY p.model ORDER BY accuracy DESC`),
 };
 
-try { db.exec("ALTER TABLE showdown_bets ADD COLUMN reasoning TEXT"); } catch { /* exists */ }
+// (showdown_bets.reasoning is handled in MIGRATIONS above, before any prepare())
 
 // seed the 4 AI competitors once
 ["Grok","ChatGPT","Gemini","Claude"].forEach((name)=>{ try { q.sdSeed.run({ name }); } catch {} });

@@ -22,15 +22,31 @@ export function buildPrompt(fixture, odds, markets) {
     ? `EVENT: ${fixture.comp}\nENTRANTS: ${(JSON.parse(fixture.entrants || "[]")).join(", ")}`
     : `MATCH: ${fixture.home} vs ${fixture.away}\nCOMPETITION: ${fixture.comp}`;
 
+  const koMs = fixture.kickoff ? Date.parse(String(fixture.kickoff).replace(" ", "T")) : NaN;
+  const started = Number.isFinite(koMs) && koMs < Date.now();
+
   return `You are a sharp ${label} betting analyst. Your job is to beat the bookmakers by finding VALUE — outcomes where the true probability is higher than the bookmaker's odds imply.
 
+STATUS AUDIT — do this before anything else:
+The current time is ${new Date().toISOString().slice(0, 16).replace("T", " ")} UTC and this event is scheduled for ${fixture.kickoff}.
+${started
+  ? "This event has ALREADY STARTED. Do not price it. Return an empty picks array and say the event has started."
+  : "This event is UPCOMING. Proceed."}
+Never describe a started or finished event as upcoming or 'in play' — if the scheduled time has passed, you decline rather than analyse.
+
 ${subject}
-START (UTC): ${fixture.kickoff}
+SCHEDULED START: ${fixture.kickoff}
 
 BOOKMAKER ODDS (with the probability each price implies):
 ${oddsLines}
 
 For each market, pick the outcome you think offers the best value and estimate its TRUE probability of winning. If your true probability exceeds the bookmaker's implied probability, that's a value bet. Use everything you know about form, injuries, matchups, venue and conditions. Do not force a bet — only lean in where you genuinely disagree with the price. Keep your picks logically CONSISTENT with each other across markets of this same match (e.g. never pick a 90-minute draw in 1X2 and also a team to win in regular time).
+
+CALIBRATION DISCIPLINE — stakes are sized by quarter-Kelly from the probability you return, so an inflated probability becomes an oversized bet:
+- Your probability is the chance the selection WINS, 0-100, and must be internally coherent (the outcomes of one market should sum to roughly 100%).
+- Only claim an edge you can name a reason for. "Slightly under-priced" with no mechanism is not an edge — return no pick instead.
+- A 15%+ edge on a liquid market almost always means you have misread the line or the market type. Re-check before returning it.
+- If you lack the inputs (unknown competitors, no form, ambiguous market), say so and return no pick. A pass costs nothing; a fabricated probability costs money.
 ${marketsSpec(mkts)}`;
 }
 
