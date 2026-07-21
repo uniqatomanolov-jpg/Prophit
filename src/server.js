@@ -256,7 +256,7 @@ app.get("/api/health", (_, res) => res.json({ ok: true }));
 // features that call routes it doesn't have would 404 with no explanation —
 // instead the UI reads these flags and says exactly what's missing.
 const BUILD = "2026-07-19b";   // bump on every deploy so /api/version proves which code is live
-const CAPABILITIES = ["mission-auto", "auto-settle", "purge-junk", "reset", "showdown-bulk", "feed-hygiene", "value-board", "undated-uploads", "schema-migrations", "dedupe", "settle-stats"];
+const CAPABILITIES = ["mission-auto", "auto-settle", "purge-junk", "reset", "showdown-bulk", "feed-hygiene", "value-board", "undated-uploads", "schema-migrations", "dedupe", "reclassify", "settle-stats"];
 app.get("/api/version", (_, res) => res.json({ build: BUILD, capabilities: CAPABILITIES, resetOnBoot: process.env.RESET_ON_BOOT || null }));
 
 // External-cron endpoint: wakes the server and runs the full cycle.
@@ -571,6 +571,12 @@ app.post("/api/clear-finished", requireAdmin, (_, res) => {
 });
 
 // Admin: fold duplicate fixtures (same teams, same day, different spelling) into one.
+// Admin: clean up legacy rows — misfiled outrights and duplicate sport keys.
+app.post("/api/reclassify", requireAdmin, (_, res) => {
+  try { res.json({ ok: true, ...reclassifyFixtures() }); }
+  catch (e) { console.error("[reclassify]", e.message); res.status(400).json({ error: e.message }); }
+});
+
 app.post("/api/dedupe", requireAdmin, (_, res) => {
   try { res.json({ ok: true, ...mergeDuplicateFixtures() }); }
   catch (e) { console.error("[dedupe]", e.message); res.status(400).json({ error: e.message }); }

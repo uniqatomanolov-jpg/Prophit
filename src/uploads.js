@@ -50,6 +50,46 @@ export const manualId = (r) => `manual:${idSlug(r.sport)}:${idSlug(r.home)}_v_${
 // Fixtures stored before the identity fix (or from a source that spells a name
 // differently) sit in the DB as separate rows. Fold them into one: the survivor
 // is the row with the most picks, and its odds/picks absorb the others'.
+// —— RECLASSIFY EXISTING ROWS ————————————————————————————
+// Two kinds of legacy mess the ingest guards can only stop going forward:
+//   1. outright fields stored as head-to-heads under the wrong sport
+//      (the "Podium Finish" pair sitting under Darts)
+//   2. the same sport under two keys (nba + basketball) — two sidebar rows
+// This fixes what is already in the database.
+const OUTRIGHT_COMP_RX = /podium|top ?\d|outright|race winner|to win (the )?(race|title|tournament)/i;
+export function reclassifyFixtures() {
+  const out = { deletedOutright: 0, resportedRows: 0, merged: 0, examples: [] };
+  const all = db.prepare("SELECT id, sport, comp, home, away FROM fixtures").all();
+
+  // 1) an outright market stored as a matchup can never settle — remove it
+  for (const f of all) {
+    const looksOutright = OUTRIGHT_COMP_RX.test(String(f.comp || ""));
+    const isH2H = f.away && String(f.away).trim() !== "";
+    if (!looksOutright || !isH2H) continue;
+    db.transaction(() => {
+      db.prepare("DELETE FROM picks WHERE fixture_id=?").run(f.id);
+      db.prepare("DELETE FROM odds WHERE fixture_id=?").run(f.id);
+      db.prepare("DELETE FROM fixtures WHERE id=?").run(f.id);
+    })();
+    out.deletedOutright++;
+    if (out.examples.length < 6) out.examples.push(`${f.sport}/${f.comp}: ${f.home} v ${f.away}`);
+  }
+
+  // 2) fold sport aliases so one sport is one row in the sidebar
+  for (const f of db.prepare("SELECT id, sport FROM fixtures").all()) {
+    const canon = canonSport(f.sport);
+    if (canon && canon !== f.sport) {
+      db.prepare("UPDATE fixtures SET sport=? WHERE id=?").run(canon, f.id);
+      out.resportedRows++;
+    }
+  }
+
+  // 3) renaming can create twins — fold them
+  out.merged = mergeDuplicateFixtures().merged;
+  console.log("[reclassify]", out);
+  return out;
+}
+
 export function mergeDuplicateFixtures() {
   const all = db.prepare("SELECT id, sport, home, away, kickoff, status FROM fixtures").all();
   const groups = {};
