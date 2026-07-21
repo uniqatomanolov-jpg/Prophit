@@ -258,6 +258,7 @@ export function snapshotClosingLines() {
 }
 
 export async function gradeFinished() {
+  updateStatuses();            // keep fixture status honest before anything else
   snapshotClosingLines();                  // must happen before results overwrite anything
   // 1) results feed (if a key is configured) settles finished games by name match
   try {
@@ -326,4 +327,22 @@ export function correctFromStat(market, pick, value) {
   const line = parseFloat(num);
   if (v === line) return null;                       // push
   return (p.includes("over") ? v > line : v < line) ? 1 : 0;
+}
+
+// —— STATUS TRANSITIONS ————————————————————————————————————
+// A fixture that kicked off an hour ago is not "upcoming". Nothing else moved
+// these rows, so the API kept reporting every past game as upcoming and the
+// settle queue was the only place they surfaced.
+export function updateStatuses() {
+  const live = db.prepare(`
+    UPDATE fixtures SET status='live'
+     WHERE status='upcoming' AND kickoff IS NOT NULL
+       AND datetime(replace(kickoff,' ','T')) <= datetime('now')`).run().changes;
+  // long past and still ungraded → flag as awaiting a result, not as live
+  const awaiting = db.prepare(`
+    UPDATE fixtures SET status='awaiting_result'
+     WHERE status='live' AND kickoff IS NOT NULL
+       AND datetime(replace(kickoff,' ','T')) < datetime('now', ?)`).run(`-${Number(process.env.LIVE_WINDOW_HOURS) || 4} hours`).changes;
+  if (live || awaiting) console.log(`[status] ${live} → live, ${awaiting} → awaiting_result`);
+  return { live, awaiting };
 }

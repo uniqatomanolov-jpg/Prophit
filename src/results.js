@@ -43,7 +43,7 @@ export function nrmName(x) {
   return ALIAS[v] || v;
 }
 // token-overlap similarity so "Nottingham Forest" ↔ "Nott m Forest" still matches
-function similar(a, b) {
+export function similar(a, b) {
   const A = nrmName(a).split(" ").filter(Boolean), B = nrmName(b).split(" ").filter(Boolean);
   if (!A.length || !B.length) return 0;
   if (A.join(" ") === B.join(" ")) return 1;
@@ -124,7 +124,7 @@ export async function autoSettle({ daysFrom = 3, dryRun = false } = {}) {
   }
   const GRACE = Number(process.env.SETTLE_GRACE_HOURS) || 2.5;
   const pending = db.prepare(`
-    SELECT * FROM fixtures WHERE status='upcoming' AND kickoff IS NOT NULL
+    SELECT * FROM fixtures WHERE status IN ('upcoming','live','awaiting_result') AND kickoff IS NOT NULL
       AND datetime(replace(kickoff,' ','T')) < datetime('now', ?)
     ORDER BY kickoff DESC LIMIT 300`).all(`-${GRACE} hours`);
   if (!pending.length) return { ok: true, settled: 0, graded: 0, checked: 0, note: "nothing pending" };
@@ -173,4 +173,24 @@ export async function autoSettle({ daysFrom = 3, dryRun = false } = {}) {
   }
   return { ok: true, checked: pending.length, feedRows: feed.length, settled, graded,
            unmatched: unmatched.slice(0, 20), unmatchedCount: unmatched.length, dryRun };
+}
+
+// —— MATCH A RESULT ROW TO A PENDING FIXTURE ————————————
+// Used by both the results feed and the results-screenshot reader, so a name
+// that matches one way matches the other. Returns null rather than a bad guess.
+export function matchFixture(row, pending, { minScore = 0.75, windowHours = 60 } = {}) {
+  let best = null, bestScore = 0;
+  const when = row.kickoff ? Date.parse(String(row.kickoff).replace(" ", "T")) : null;
+  for (const f of pending) {
+    if (row.sport && f.sport && row.sport !== f.sport) continue;
+    if (when && f.kickoff) {
+      const ko = Date.parse(String(f.kickoff).replace(" ", "T"));
+      if (Number.isFinite(ko) && Math.abs(ko - when) > windowHours * 3600e3) continue;
+    }
+    const direct  = Math.min(similar(row.home, f.home), similar(row.away, f.away));
+    const flipped = Math.min(similar(row.home, f.away), similar(row.away, f.home));
+    const score = Math.max(direct, flipped);
+    if (score > bestScore) { bestScore = score; best = { fixture: f, flip: flipped > direct, score }; }
+  }
+  return best && bestScore >= minScore ? best : null;
 }

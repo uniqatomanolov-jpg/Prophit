@@ -1,4 +1,5 @@
-import { ingestEvents } from "./uploads.js";
+import { ingestEvents, canonSport } from "./uploads.js";
+import { db, q, markFinal, gradePick } from "./db.js";
 const SYSTEM_PROMPT = [
   'You read betting/bookmaker screenshots and output ONLY strict JSON — no prose, no markdown.',
   'Return a JSON ARRAY; each element:',
@@ -96,4 +97,111 @@ export async function parseScreenshot(base64,mediaType){
   }
   if(!Array.isArray(items))items=[items];
   return { parsed:items, ...ingestEvents(toCsvRows(items)) };
+}
+
+// ————————————————————————————————————————————————————————————————
+// RESULTS SCREENSHOT → SETTLEMENT
+// Same reader, different question: not "what are the prices" but "what was the
+// final score". Nothing is written until the admin confirms the preview, because
+// settling is destructive — a wrong score grades real picks as losses.
+// ————————————————————————————————————————————————————————————————
+const RESULTS_PROMPT = [
+  'You read FINISHED sports results from a screenshot and return JSON only.',
+  'Return an array of: {"sport":"soccer|tennis|darts|snooker|basketball|baseball|f1|...","home":string,"away":string,"hs":number,"as":number,"kickoff":"YYYY-MM-DD HH:MM","status":"final|live|upcoming","stats":{"corners":number,"cards":number,"s180s":number}}',
+  'hs = the HOME/left competitor score, as = the AWAY/right competitor score. Keep the on-screen left-right order.',
+  'ONLY include games that are FINISHED (FT, Final, Ended, a greyed-out or struck score). Set status:"live" for in-play and status:"upcoming" for not started — never invent a score for those.',
+  'Sets/legs/frames: use the MATCH score (sets or legs won), not points inside a set. Tennis 6-4 6-3 is hs:2, as:0.',
+  'If a stat is shown (corners, cards, 180s) put it in "stats"; otherwise omit "stats" entirely.',
+  'Use the date shown; "Today"/"Yesterday" headers apply to every row beneath them. Assume the current year.',
+  'Never guess a score you cannot read clearly — omit that row instead.',
+  'Output ONLY the JSON array.'
+].join('\n');
+
+export async function parseResultsScreenshot(base64, mediaType) {
+  const key = process.env.ANTHROPIC_API_KEY; if (!key) throw new Error("ANTHROPIC_API_KEY not set");
+  const media = canonMedia(mediaType);
+  const bytes = Math.floor(String(base64).length * 0.75);
+  if (bytes > 5 * 1024 * 1024) throw new Error(`screenshot is ${(bytes / 1048576).toFixed(1)}MB — the vision API caps images at 5MB. Crop it.`);
+
+  const call = async (model) => {
+    const res = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-api-key": key, "anthropic-version": "2023-06-01" },
+      body: JSON.stringify({ model, max_tokens: 4000, system: RESULTS_PROMPT,
+        messages: [{ role: "user", content: [
+          { type: "image", source: { type: "base64", media_type: media, data: base64 } },
+          { type: "text", text: "extract finished results" }] }] })
+    });
+    if (res.ok) return res.json();
+    let detail = "";
+    try { const b = await res.json(); detail = b?.error?.message || ""; } catch { }
+    const err = new Error(`vision API ${res.status}: ${detail || "no detail"}`); err.status = res.status; err.detail = detail; throw err;
+  };
+
+  let data;
+  try { data = await call(VISION_MODEL); }
+  catch (e) {
+    if (e.status === 400 && /model/i.test(e.detail || "") && VISION_MODEL !== FALLBACK_MODEL) data = await call(FALLBACK_MODEL);
+    else throw e;
+  }
+
+  const text = (data.content || []).filter((b) => b.type === "text").map((b) => b.text).join("");
+  let items;
+  try { items = JSON.parse(stripToJSON(text)); }
+  catch { throw new Error(data.stop_reason === "max_tokens" ? "too many results in one image — crop it in half" : `no usable JSON back (${String(text).slice(0, 120)})`); }
+  if (!Array.isArray(items)) items = [items];
+
+  const skipped = [];
+  const rows = items.filter((r) => {
+    if (!r || !r.home || !r.away) return false;
+    if (r.status && r.status !== "final") { skipped.push(`${r.home} v ${r.away} (${r.status})`); return false; }
+    if (typeof r.hs !== "number" || typeof r.as !== "number") { skipped.push(`${r.home} v ${r.away} (unreadable score)`); return false; }
+    if (r.sport) r.sport = canonSport(r.sport);
+    return true;
+  });
+  return { rows, skipped };
+}
+
+// Match parsed results to pending fixtures and (optionally) settle them.
+// dryRun = true returns the plan without touching a single row.
+export async function settleFromResults(rows, { dryRun = true } = {}) {
+  const { matchFixture } = await import("./results.js");
+  const { correctFromScore, correctFromStat, STAT_FOR } = await import("./jobs.js");
+  const pending = db.prepare(`SELECT * FROM fixtures WHERE status!='final' AND kickoff IS NOT NULL ORDER BY kickoff DESC LIMIT 400`).all();
+
+  const matched = [], unmatched = [];
+  let graded = 0;
+  for (const r of rows) {
+    const hit = matchFixture(r, pending);
+    if (!hit) { unmatched.push(`${r.home} ${r.hs}-${r.as} ${r.away}`); continue; }
+    const f = hit.fixture;
+    const hs = hit.flip ? r.as : r.hs;
+    const as = hit.flip ? r.hs : r.as;
+    const picks = q.picksFor.all(f.id).filter((p) => p.correct == null);
+
+    const plan = { id: f.id, fixture: `${f.home} v ${f.away}`, score: `${hs}-${as}`,
+                   confidence: Math.round(hit.score * 100), flipped: hit.flip, picks: [], pending: [] };
+    for (const pk of picks) {
+      let c = correctFromScore(pk.market, pk.pick, hs, as, f.home, f.away);
+      if (c == null) {
+        const key = STAT_FOR(pk.market);
+        if (key && r.stats && r.stats[key] != null) c = correctFromStat(pk.market, pk.pick, r.stats[key]);
+      }
+      if (c == null) plan.pending.push(`${pk.market} · ${pk.pick}`);
+      else plan.picks.push({ market: pk.market, pick: pk.pick, correct: !!c });
+    }
+
+    if (!dryRun) {
+      markFinal.run({ id: f.id, score: `${hs}-${as}` });
+      for (const pk of picks) {
+        const p = plan.picks.find((x) => x.market === pk.market && x.pick === pk.pick);
+        if (!p) continue;
+        gradePick.run({ correct: p.correct ? 1 : 0, fixture_id: f.id, model: pk.model, market: pk.market });
+        graded++;
+      }
+    }
+    matched.push(plan);
+  }
+  return { matched, unmatched, graded, dryRun,
+           wouldGrade: matched.reduce((a, m) => a + m.picks.length, 0) };
 }

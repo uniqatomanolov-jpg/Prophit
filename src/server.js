@@ -3,7 +3,7 @@ import express from "express";
 import cron from "node-cron";
 import { q, db, markFinal, gradePick } from "./db.js";
 import { syncFixtures, generatePicks, gradeFinished, correctFromScore, correctFromStat, STAT_FOR, STAT_LABEL } from "./jobs.js";
-import { parseScreenshot } from "./vision.js";
+import { parseScreenshot, parseResultsScreenshot, settleFromResults } from "./vision.js";
 import { settleCompoundingBet } from "./compounding.js";
 import { createCheckout, handleWebhook, billingEnabled, isPro, emailForSession } from "./billing.js";
 let predictBusy = false;
@@ -127,6 +127,11 @@ app.get("/api/value", (req, res) => {
   res.json(out);
 });
 
+// A pick with no matched price has no edge and no Kelly stake — it is still
+// Claude's opinion, but the UI must know it is incomplete rather than render
+// blanks that look like a bug.
+const withCompleteness = (p) => ({ ...p, incomplete: p.price == null || p.probability == null });
+
 app.get("/api/fixtures", (req, res) => {
   const base = req.query.sport ? q.fixturesBySport.all({ sport: req.query.sport }) : q.fixturesAll.all();
   const clean = base.filter((f) => !feedReject(f));
@@ -134,7 +139,7 @@ app.get("/api/fixtures", (req, res) => {
     ...f,
     entrants: f.entrants ? JSON.parse(f.entrants) : null,
     odds: q.oddsFor.all(f.id),
-    picks: q.picksFor.all(f.id),
+    picks: q.picksFor.all(f.id).map(withCompleteness),
   }));
   res.json(applyAccessGate(fixtures, callerAccess(req)));
 });
@@ -256,7 +261,7 @@ app.get("/api/health", (_, res) => res.json({ ok: true }));
 // features that call routes it doesn't have would 404 with no explanation —
 // instead the UI reads these flags and says exactly what's missing.
 const BUILD = "2026-07-19b";   // bump on every deploy so /api/version proves which code is live
-const CAPABILITIES = ["mission-auto", "auto-settle", "purge-junk", "reset", "showdown-bulk", "feed-hygiene", "value-board", "undated-uploads", "schema-migrations", "dedupe", "reclassify", "settle-stats"];
+const CAPABILITIES = ["mission-auto", "auto-settle", "purge-junk", "reset", "showdown-bulk", "feed-hygiene", "value-board", "undated-uploads", "schema-migrations", "dedupe", "reclassify", "results-vision", "settle-stats"];
 app.get("/api/version", (_, res) => res.json({ build: BUILD, capabilities: CAPABILITIES, resetOnBoot: process.env.RESET_ON_BOOT || null }));
 
 // External-cron endpoint: wakes the server and runs the full cycle.
@@ -572,6 +577,34 @@ app.post("/api/clear-finished", requireAdmin, (_, res) => {
 
 // Admin: fold duplicate fixtures (same teams, same day, different spelling) into one.
 // Admin: clean up legacy rows — misfiled outrights and duplicate sport keys.
+// Results screenshot → settlement. Two calls by design: the first previews what
+// it read and what it matched, the second commits. Settling grades real picks,
+// so it never happens off a single unverified click.
+app.post("/api/upload-results-screenshot", requireAdmin, async (req, res) => {
+  try {
+    const { image, commit } = req.body || {};
+    if (!image) return res.status(400).json({ error: "no image" });
+    const m = String(image).match(/^data:(image\/[a-zA-Z+]+);base64,(.*)$/);
+    if (!m) return res.status(400).json({ error: "expected a base64 data URL" });
+    const { rows, skipped } = await parseResultsScreenshot(m[2], m[1]);
+    if (!rows.length) return res.json({ read: 0, skipped, matched: [], unmatched: [], graded: 0, dryRun: true });
+    const plan = await settleFromResults(rows, { dryRun: !commit });
+    res.json({ read: rows.length, skipped, ...plan });
+  } catch (e) {
+    console.error("[results-screenshot]", e.message);
+    res.status(400).json({ error: e.message });
+  }
+});
+
+// Commit a plan the admin has already seen (sent back verbatim from the preview).
+app.post("/api/settle-from-plan", requireAdmin, async (req, res) => {
+  try {
+    const rows = Array.isArray(req.body?.rows) ? req.body.rows : null;
+    if (!rows || !rows.length) return res.status(400).json({ error: "no rows to settle" });
+    res.json(await settleFromResults(rows, { dryRun: false }));
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
 app.post("/api/reclassify", requireAdmin, (_, res) => {
   try { res.json({ ok: true, ...reclassifyFixtures() }); }
   catch (e) { console.error("[reclassify]", e.message); res.status(400).json({ error: e.message }); }
@@ -610,7 +643,7 @@ app.post("/api/fix-dates", requireAdmin, (_, res) => {
   const k = slot.toISOString().slice(0, 10) + " 20:00";
   const r = db.prepare(`
     UPDATE fixtures SET kickoff=@k, status='upcoming'
-    WHERE id LIKE 'manual:%' AND status='upcoming' AND kickoff IS NOT NULL
+    WHERE id LIKE 'manual:%' AND status IN ('upcoming','live','awaiting_result') AND kickoff IS NOT NULL
       AND datetime(replace(kickoff,' ','T')) < datetime('now')
   `).run({ k });
   console.log(`[fix-dates] moved ${r.changes} games to ${k}`);

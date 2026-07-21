@@ -11,7 +11,7 @@ CREATE TABLE IF NOT EXISTS fixtures (
   home TEXT, away TEXT,            -- h2h only
   entrants JSON,                   -- race only: ordered grid/field of names
   kickoff TEXT,
-  status TEXT DEFAULT 'upcoming',  -- upcoming | live | final
+  status TEXT DEFAULT 'upcoming',  -- upcoming | live | awaiting_result | final
   score TEXT,
   raw JSON
 );
@@ -149,7 +149,7 @@ export const gradePick = db.prepare(`
 export const markFinal = db.prepare(`UPDATE fixtures SET status='final', score=@score WHERE id=@id`);
 
 export const q = {
-  upcoming: db.prepare(`SELECT * FROM fixtures WHERE status='upcoming' ORDER BY kickoff`),
+  upcoming: db.prepare(`SELECT * FROM fixtures WHERE status IN ('upcoming','live','awaiting_result') ORDER BY kickoff`),
   finishedUngraded: db.prepare(`
     SELECT DISTINCT f.* FROM fixtures f JOIN picks p ON p.fixture_id=f.id
     WHERE f.status='final' AND p.correct IS NULL`),
@@ -249,11 +249,11 @@ export const q = {
     SELECT f.id, f.sport, f.comp, f.home, f.away, f.kickoff,
       (SELECT COUNT(*) FROM picks p WHERE p.fixture_id=f.id) npicks
     FROM fixtures f
-    WHERE f.status='upcoming' AND f.kickoff IS NOT NULL
+    WHERE f.status IN ('upcoming','live','awaiting_result') AND f.kickoff IS NOT NULL
       AND datetime(replace(f.kickoff,' ','T')) < datetime('now','-2 hours')
     ORDER BY f.kickoff DESC LIMIT 100`),
   manualPending: db.prepare(`
-    SELECT * FROM fixtures WHERE id LIKE 'manual:%' AND status='upcoming' AND kickoff IS NOT NULL`),
+    SELECT * FROM fixtures WHERE id LIKE 'manual:%' AND status IN ('upcoming','live','awaiting_result') AND kickoff IS NOT NULL`),
   claudeStats: db.prepare(`
     SELECT COUNT(*) total,
       SUM(p.correct) wins,

@@ -44,7 +44,13 @@ export const idSlug = (s) => String(s == null ? "" : s)
   .replace(/[^a-z0-9 ]+/g, " ")
   .replace(CLUB_WORDS, " ")                             // Queretaro FC → Queretaro
   .replace(/\s+/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "");
-export const manualId = (r) => `manual:${idSlug(r.sport)}:${idSlug(r.home)}_v_${idSlug(r.away)}`;
+export const manualId = (r) => {
+  const away = idSlug(r.away);
+  // an outright (race, tournament winner) has no opponent — "_v_" with nothing
+  // after it produced ids like "hungarian-grand-prix_v_" and labels ending " vs "
+  return away ? `manual:${idSlug(r.sport)}:${idSlug(r.home)}_v_${away}`
+              : `manual:${idSlug(r.sport)}:${idSlug(r.home)}`;
+};
 
 // —— MERGE EXISTING DUPLICATES ————————————————————————————
 // Fixtures stored before the identity fix (or from a source that spells a name
