@@ -2,7 +2,7 @@ import "dotenv/config";
 import express from "express";
 import cron from "node-cron";
 import { q, db, markFinal, gradePick } from "./db.js";
-import { syncFixtures, generatePicks, gradeFinished, correctFromScore, correctFromStat, STAT_FOR, STAT_LABEL } from "./jobs.js";
+import { syncFixtures, generatePicks, gradeFinished, correctFromScore, correctFromStat, STAT_FOR, STAT_LABEL, updateStatuses, repriceIncompletePicks } from "./jobs.js";
 import { parseScreenshot, parseResultsScreenshot, settleFromResults } from "./vision.js";
 import { settleCompoundingBet } from "./compounding.js";
 import { createCheckout, handleWebhook, billingEnabled, isPro, emailForSession } from "./billing.js";
@@ -12,7 +12,7 @@ function predictSoon() {
   predictBusy = true;
   generatePicks().catch((e) => console.error("[auto-predict]", e.message)).finally(() => { predictBusy = false; });
 }
-import { ingestEvents, ingestResults, isBadName, parseCSV, mergeDuplicateFixtures, canonSport } from "./uploads.js";
+import { ingestEvents, ingestResults, isBadName, parseCSV, mergeDuplicateFixtures, canonSport, reclassifyFixtures } from "./uploads.js";
 
 const app = express();
 // Stripe webhook needs the raw body for signature verification — mount BEFORE json parser.
@@ -132,7 +132,15 @@ app.get("/api/value", (req, res) => {
 // blanks that look like a bug.
 const withCompleteness = (p) => ({ ...p, incomplete: p.price == null || p.probability == null });
 
+let __lastStatusSweep = 0;
+function sweepStatuses() {
+  if (Date.now() - __lastStatusSweep < 60e3) return;      // at most once a minute
+  __lastStatusSweep = Date.now();
+  try { updateStatuses(); } catch (e) { console.warn("[status]", e.message); }
+}
+
 app.get("/api/fixtures", (req, res) => {
+  sweepStatuses();
   const base = req.query.sport ? q.fixturesBySport.all({ sport: req.query.sport }) : q.fixturesAll.all();
   const clean = base.filter((f) => !feedReject(f));
   const fixtures = clean.map((f) => ({
@@ -215,11 +223,13 @@ app.get("/api/stripe/session", async (req, res) => {
 // Sits out entirely when nothing clears the bar — no forced daily bet.
 const MISSION_MIN_EDGE = Number(process.env.MISSION_MIN_EDGE) || 4;    // %
 const MISSION_MAX_ODDS = Number(process.env.MISSION_MAX_ODDS) || 3.5;  // survival: no longshots
-app.post("/api/compounding/auto", requireAdmin, (req, res) => {
+// The mission picker, callable from the route AND the cron — this is the
+// autonomy: ValueBot chooses its own game and sizes its own stake by Kelly.
+function autoMissionPick() {
   const run = q.cmpActiveRun.get();
-  if (!run) return res.status(400).json({ error: "no active run" });
+  if (!run) return { error: "no active run" };
   const already = q.cmpBets.all({ run: run.id }).some((b) => b.status === "pending");
-  if (already) return res.json({ ...runView(run), note: "a mission bet is already live" });
+  if (already) return { ...runView(run), note: "a mission bet is already live" };
 
   const now = Date.now();
   let best = null;
@@ -241,27 +251,42 @@ app.post("/api/compounding/auto", requireAdmin, (req, res) => {
                  edge: p.edge, prob: p.probability, event: `${f.home} v ${f.away}` };
     }
   }
-  if (!best) return res.json({ ...runView(run), none: true,
-    reason: `no edge \u2265 ${MISSION_MIN_EDGE}% at odds \u2264 ${MISSION_MAX_ODDS} today \u2014 sitting out` });
+  if (!best) return { ...runView(run), none: true,
+    reason: `no edge \u2265 ${MISSION_MIN_EDGE}% at odds \u2264 ${MISSION_MAX_ODDS} today \u2014 sitting out` };
 
+  // Kelly from ValueBot's own probability — and if Kelly says zero, it SITS OUT.
+  // No token fallback stake on a bet its own math rejects.
   const fair = best.prob > 0 ? 100 / best.prob : best.odds;
-  let stake = kellyStake(run.current_bankroll, best.odds, fair);
-  if (stake <= 0) stake = Math.round(run.current_bankroll * 0.02 * 100) / 100;
-  stake = Math.min(stake, run.current_bankroll);
+  const stake = Math.min(kellyStake(run.current_bankroll, best.odds, fair), run.current_bankroll);
+  if (stake <= 0) return { ...runView(run), none: true,
+    reason: "Kelly sized the best available edge at zero — sitting out rather than forcing a bet" };
   q.cmpAddBet.run({ run: run.id, fid: best.fixture_id, market: best.market,
     option: best.option, odds: best.odds, stake });
-  console.log(`[mission] auto-picked ${best.event} ${best.option} @${best.odds} (edge ${best.edge}%) stake \u20ac${stake}`);
-  res.json({ ...runView(q.cmpActiveRun.get()), picked: { ...best, stake } });
+  console.log(`[mission] auto-picked ${best.event} ${best.option} @${best.odds} (edge ${best.edge}%) stake €${stake} (Kelly)`);
+  return { ...runView(q.cmpActiveRun.get()), picked: { ...best, stake } };
+}
+
+app.post("/api/compounding/auto", requireAdmin, (req, res) => {
+  const out = autoMissionPick();
+  if (out.error) return res.status(400).json(out);
+  res.json(out);
 });
 
+app.get("/", (_, res) => res.json({ ok: true, service: "valuebot-backend", docs: "/api/version" }));
 app.get("/api/health", (_, res) => res.json({ ok: true }));
+// aliases for external monitors/audit tools that probe conventional paths —
+// both serve the same feed as /api/fixtures
+app.get(["/api/live", "/api/games"], (req, res) => {
+  const qs = req.url.includes("?") ? req.url.slice(req.url.indexOf("?")) : "";
+  res.redirect(307, "/api/fixtures" + qs);
+});
 
 // —— BUILD IDENTITY ————————————————————————————————————
 // The page checks this on load. If the deployed backend is older than the page,
 // features that call routes it doesn't have would 404 with no explanation —
 // instead the UI reads these flags and says exactly what's missing.
 const BUILD = "2026-07-19b";   // bump on every deploy so /api/version proves which code is live
-const CAPABILITIES = ["mission-auto", "auto-settle", "purge-junk", "reset", "showdown-bulk", "feed-hygiene", "value-board", "undated-uploads", "schema-migrations", "dedupe", "reclassify", "results-vision", "settle-stats"];
+const CAPABILITIES = ["mission-auto", "auto-settle", "purge-junk", "reset", "showdown-bulk", "feed-hygiene", "value-board", "undated-uploads", "schema-migrations", "dedupe", "reclassify", "results-vision", "status-sweep", "reprice", "live-alias", "settle-stats"];
 app.get("/api/version", (_, res) => res.json({ build: BUILD, capabilities: CAPABILITIES, resetOnBoot: process.env.RESET_ON_BOOT || null }));
 
 // External-cron endpoint: wakes the server and runs the full cycle.
@@ -274,6 +299,13 @@ app.get("/api/cron", async (_, res) => {
   try {
     await generatePicks();
     await gradeFinished();
+    // ValueBot runs its own mission: once grading frees the slot, it selects the
+    // next game and stakes it by Kelly without waiting for a button.
+    try {
+      const m = autoMissionPick();
+      if (m.picked) console.log(`[cron] mission bet placed: ${m.picked.event} @${m.picked.odds} stake €${m.picked.stake}`);
+      else if (m.reason) console.log(`[cron] mission: ${m.reason}`);
+    } catch (e) { console.warn("[cron] mission:", e.message); }
     console.log("[cron] cycle complete");
   } catch (e) { console.error("[cron]", e.message); }
   finally { cronBusy = false; }
@@ -606,7 +638,7 @@ app.post("/api/settle-from-plan", requireAdmin, async (req, res) => {
 });
 
 app.post("/api/reclassify", requireAdmin, (_, res) => {
-  try { res.json({ ok: true, ...reclassifyFixtures() }); }
+  try { res.json({ ok: true, ...reclassifyFixtures(), reprice: repriceIncompletePicks() }); }
   catch (e) { console.error("[reclassify]", e.message); res.status(400).json({ error: e.message }); }
 });
 
@@ -762,6 +794,18 @@ const port = process.env.PORT || 3001;
 // deployed build is too old to expose /api/reset — the same deploy that ships the
 // new code also clears the record.
 // REMOVE THE VAR AFTERWARDS or every future deploy wipes again (the UI warns you).
+// data honesty on every boot: statuses reflect the clock, price-less picks get
+// one more chance to match their odds. Both are idempotent.
+try {
+  updateStatuses();
+  repriceIncompletePicks();
+  // deploy-proof cleanup: misfiled outrights (the "Podium Finish under Darts"
+  // class of row) and duplicate sport keys are removed on every boot, so a
+  // deploy alone fixes the sidebar — no admin button required.
+  const rc = reclassifyFixtures();
+  if (rc.deletedOutright || rc.resportedRows || rc.merged) console.log("[boot] reclassified:", rc);
+} catch (e) { console.warn("[boot]", e.message); }
+
 const RESET_ON_BOOT = String(process.env.RESET_ON_BOOT || "").trim();
 if (RESET_ON_BOOT) {
   if (["record", "fixtures", "all"].includes(RESET_ON_BOOT)) {

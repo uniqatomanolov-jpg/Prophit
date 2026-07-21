@@ -346,3 +346,36 @@ export function updateStatuses() {
   if (live || awaiting) console.log(`[status] ${live} → live, ${awaiting} → awaiting_result`);
   return { live, awaiting };
 }
+
+// —— BACKFILL: reprice picks stored without a price ————————
+// Old builds matched pick-text to odds labels with an exact-substring rule, so
+// "away" never matched "Palmeiras" and the pick was stored with price=null —
+// no edge, no Kelly, blank cells. The alias matcher fixes NEW picks; this
+// repairs the ones already in the database using the same rules.
+export function repriceIncompletePicks() {
+  const rows = db.prepare(`
+    SELECT p.rowid rid, p.fixture_id, p.model, p.market, p.pick, p.probability,
+           f.home, f.away
+      FROM picks p JOIN fixtures f ON f.id = p.fixture_id
+     WHERE p.price IS NULL AND p.correct IS NULL AND p.pick IS NOT NULL AND p.pick != 'pass'`).all();
+  let repriced = 0, stillMissing = 0;
+  for (const r of rows) {
+    const odds = db.prepare("SELECT market, option, price FROM odds WHERE fixture_id=?").all(r.fixture_id);
+    const pool = odds.filter((o) => o.market === r.market);
+    const b = String(r.pick).toLowerCase().trim();
+    const h = String(r.home || "").toLowerCase().trim(), a = String(r.away || "").toLowerCase().trim();
+    const cands = new Set([b]);
+    if (b === "home" || (h && b === h)) { cands.add("home"); cands.add("1"); if (h) cands.add(h); }
+    if (b === "away" || (a && b === a)) { cands.add("away"); cands.add("2"); if (a) cands.add(a); }
+    if (b === "draw" || b === "x") { cands.add("draw"); cands.add("x"); }
+    let price = null;
+    for (const c of cands) { const hit = pool.find((o) => o.option.toLowerCase().trim() === c); if (hit) { price = hit.price; break; } }
+    if (price == null) { const loose = pool.find((o) => { const x = o.option.toLowerCase().trim(); return x.includes(b) || b.includes(x); }); if (loose) price = loose.price; }
+    if (price == null) { stillMissing++; continue; }
+    const edge = r.probability != null ? Math.round((r.probability / 100 - 1 / price) * 1000) / 10 : null;
+    db.prepare("UPDATE picks SET price=?, edge=COALESCE(?, edge) WHERE rowid=?").run(price, edge, r.rid);
+    repriced++;
+  }
+  if (repriced || stillMissing) console.log(`[reprice] ${repriced} picks repriced, ${stillMissing} have no matching odds at all`);
+  return { repriced, stillMissing, scanned: rows.length };
+}
