@@ -163,7 +163,7 @@ export const q = {
       FROM picks p JOIN fixtures f ON f.id = p.fixture_id
      WHERE p.model = 'claude' AND p.correct IS NULL AND p.edge IS NOT NULL AND p.edge > 0
        AND f.status != 'final' AND f.kickoff IS NOT NULL
-       AND datetime(replace(f.kickoff,' ','T')) > datetime('now','-2 hours')
+       AND datetime(replace(f.kickoff,' ','T')) > datetime('now')  -- a value pick is only bettable BEFORE kick-off
      ORDER BY p.edge DESC LIMIT @limit`),
   fixturesBySport: db.prepare(`SELECT * FROM fixtures WHERE sport=@sport ORDER BY kickoff DESC LIMIT 100`),
   oddsFor: db.prepare(`SELECT market, option, price FROM odds WHERE fixture_id=?`),

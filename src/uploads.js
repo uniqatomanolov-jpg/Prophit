@@ -92,8 +92,69 @@ export function reclassifyFixtures() {
 
   // 3) renaming can create twins — fold them
   out.merged = mergeDuplicateFixtures().merged;
+  out.fuzzyMerged = mergeFuzzyTwins().merged;
   console.log("[reclassify]", out);
   return out;
+}
+
+// Fuzzy second pass: the SAME home team, SAME sport, SAME day, but a garbled
+// opponent — "Maccabi Jaffa Sheva" / "Roel Beer Sheva" / "Hapoel Beer Sheva"
+// are five vision misreads of one match. Exact-slug dedupe can't see that.
+// Token-overlap on the away name (>=0.5) chains them into one group.
+// The identical-home + same-day requirement keeps this safe for darts/tennis,
+// where one player genuinely meets DIFFERENT opponents on the same day —
+// two real opponents share ~no tokens, so they never reach 0.5.
+function tokenSim(a, b) {
+  const A = String(a || "").toLowerCase().replace(/[^a-z0-9 ]+/g, " ").split(/\s+/).filter(Boolean);
+  const B = String(b || "").toLowerCase().replace(/[^a-z0-9 ]+/g, " ").split(/\s+/).filter(Boolean);
+  if (!A.length || !B.length) return 0;
+  const shared = A.filter((t) => B.includes(t)).length;
+  return shared / Math.max(A.length, B.length);
+}
+export function mergeFuzzyTwins() {
+  const all = db.prepare("SELECT id, sport, home, away, kickoff FROM fixtures WHERE away IS NOT NULL AND away != ''").all();
+  const groups = {};
+  for (const f of all) {
+    const key = `${idSlug(f.sport)}|${idSlug(f.home)}|${String(f.kickoff || "").slice(0, 10)}`;
+    (groups[key] = groups[key] || []).push(f);
+  }
+  const nPicks = db.prepare("SELECT COUNT(*) n FROM picks WHERE fixture_id=?");
+  let merged = 0; const examples = [];
+  for (const key in groups) {
+    const g = groups[key];
+    if (g.length < 2) continue;
+    // union-find over away-name similarity
+    const parent = g.map((_, i) => i);
+    const find = (i) => (parent[i] === i ? i : (parent[i] = find(parent[i])));
+    for (let i = 0; i < g.length; i++)
+      for (let j = i + 1; j < g.length; j++)
+        if (tokenSim(g[i].away, g[j].away) >= 0.5) parent[find(i)] = find(j);
+    const clusters = {};
+    g.forEach((f, i) => { const r = find(i); (clusters[r] = clusters[r] || []).push(f); });
+    for (const r in clusters) {
+      const c = clusters[r];
+      if (c.length < 2) continue;
+      // survivor's display name: prefer the most CENTRAL away spelling — the one
+      // sharing the most tokens with its siblings is least likely to be the
+      // one-off misread. Pick count breaks ties (protects graded history).
+      const central = (f) => c.reduce((t, o) => t + (o === f ? 0 : tokenSim(f.away, o.away)), 0);
+      c.sort((a, b) => central(b) - central(a) || nPicks.get(b.id).n - nPicks.get(a.id).n || String(a.id).localeCompare(String(b.id)));
+      const keep = c[0];
+      for (const dupe of c.slice(1)) {
+        db.transaction(() => {
+          db.prepare("UPDATE OR IGNORE odds SET fixture_id=? WHERE fixture_id=?").run(keep.id, dupe.id);
+          db.prepare("UPDATE OR IGNORE picks SET fixture_id=? WHERE fixture_id=?").run(keep.id, dupe.id);
+          db.prepare("DELETE FROM odds WHERE fixture_id=?").run(dupe.id);
+          db.prepare("DELETE FROM picks WHERE fixture_id=?").run(dupe.id);
+          db.prepare("DELETE FROM fixtures WHERE id=?").run(dupe.id);
+        })();
+        merged++;
+        if (examples.length < 5) examples.push(`"${dupe.away}" \u2192 "${keep.away}"`);
+      }
+    }
+  }
+  if (merged) console.log(`[fuzzy-merge] ${merged} garbled twins folded`, examples);
+  return { merged, examples };
 }
 
 export function mergeDuplicateFixtures() {
