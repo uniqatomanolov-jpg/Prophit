@@ -22,6 +22,7 @@ const SYSTEM_PROMPT = [
   'Infer the sport from the runners, not from other screenshots: F1 drivers -> "f1", MotoGP riders -> "motogp", golfers -> "golf". Never label a driver list as darts/tennis.',
   'A single "Yes" or "Odds" column beside a list of people is an outright: one row per person, that price is theirs.',
   'The event name is usually the page heading (e.g. "Hungarian Grand Prix") \u2014 put it in "home", and put the market heading in "market", NOT in "competition".',
+  'NEVER use the market heading ("Podium Finish", "Winner", "Top 10") as the event name. If no race/tournament name is visible anywhere, use "<Sport> race <date>" \u2014 do not invent one.',
   'Map the heading to the market: Winner/To Win Race->winner; Podium/Top 3->podium; Top 6->top6; Top 10->top10.',
   'If a "Closes: dd/mm HH:MM" or similar is shown, use it as the kickoff (assume the current year).',
   '',

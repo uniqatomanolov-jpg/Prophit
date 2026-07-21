@@ -93,6 +93,7 @@ export function reclassifyFixtures() {
   // 3) renaming can create twins — fold them
   out.merged = mergeDuplicateFixtures().merged;
   out.fuzzyMerged = mergeFuzzyTwins().merged;
+  out.raceMerged = mergeRaceOutrights().merged;
   console.log("[reclassify]", out);
   return out;
 }
@@ -154,6 +155,47 @@ export function mergeFuzzyTwins() {
     }
   }
   if (merged) console.log(`[fuzzy-merge] ${merged} garbled twins folded`, examples);
+  return { merged, examples };
+}
+
+// —— RACE OUTRIGHT TWINS ————————————————————————————————
+// One motorsport race per sport per day is a safe assumption (there is exactly
+// one F1 Grand Prix on a Sunday). Vision misreads split it into several
+// fixtures — "Hungarian Grand Prix", "Podium Finish", "Formula 1 Race" — each
+// carrying the same drivers. Fold same-sport same-day away-less fixtures into
+// one, preferring the survivor whose name is an actual event, not a market.
+const MARKETISH_RX = /^(podium( finish)?|race winner|winner|top ?\d+( finish)?|outright|formula ?1( race)?|f1( race)?|motogp( race)?|grand prix)$/i;
+export function mergeRaceOutrights() {
+  const RACE = ["f1", "motogp", "nascar", "golf", "cycling"];
+  const nPicks = db.prepare("SELECT COUNT(*) n FROM picks WHERE fixture_id=?");
+  let merged = 0; const examples = [];
+  for (const sport of RACE) {
+    const rows = db.prepare(
+      "SELECT id, home, kickoff FROM fixtures WHERE sport=? AND (away IS NULL OR away='')").all(sport);
+    const byDay = {};
+    for (const f of rows) (byDay[String(f.kickoff || "?").slice(0, 10)] = byDay[String(f.kickoff || "?").slice(0, 10)] || []).push(f);
+    for (const day in byDay) {
+      const g = byDay[day];
+      if (g.length < 2) continue;
+      g.sort((a, b) =>
+        (MARKETISH_RX.test(a.home) ? 1 : 0) - (MARKETISH_RX.test(b.home) ? 1 : 0) ||  // real names first
+        nPicks.get(b.id).n - nPicks.get(a.id).n ||
+        String(a.id).localeCompare(String(b.id)));
+      const keep = g[0];
+      for (const dupe of g.slice(1)) {
+        db.transaction(() => {
+          db.prepare("UPDATE OR IGNORE odds SET fixture_id=? WHERE fixture_id=?").run(keep.id, dupe.id);
+          db.prepare("UPDATE OR IGNORE picks SET fixture_id=? WHERE fixture_id=?").run(keep.id, dupe.id);
+          db.prepare("DELETE FROM odds WHERE fixture_id=?").run(dupe.id);
+          db.prepare("DELETE FROM picks WHERE fixture_id=?").run(dupe.id);
+          db.prepare("DELETE FROM fixtures WHERE id=?").run(dupe.id);
+        })();
+        merged++;
+        if (examples.length < 5) examples.push(`"${dupe.home}" \u2192 "${keep.home}"`);
+      }
+    }
+  }
+  if (merged) console.log(`[race-merge] ${merged} outright twins folded`, examples);
   return { merged, examples };
 }
 
