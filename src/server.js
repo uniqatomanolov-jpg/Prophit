@@ -2,17 +2,17 @@ import "dotenv/config";
 import express from "express";
 import cron from "node-cron";
 import { q, db, markFinal, gradePick } from "./db.js";
-import { syncFixtures, generatePicks, gradeFinished, correctFromScore } from "./jobs.js";
+import { syncFixtures, generatePicks, gradeFinished, correctFromScore, correctFromStat, STAT_FOR, STAT_LABEL } from "./jobs.js";
 import { parseScreenshot } from "./vision.js";
 import { settleCompoundingBet } from "./compounding.js";
-import { createCheckout, handleWebhook, billingEnabled, isPro } from "./billing.js";
+import { createCheckout, handleWebhook, billingEnabled, isPro, emailForSession } from "./billing.js";
 let predictBusy = false;
 function predictSoon() {
   if (predictBusy) return;
   predictBusy = true;
   generatePicks().catch((e) => console.error("[auto-predict]", e.message)).finally(() => { predictBusy = false; });
 }
-import { ingestEvents, ingestResults, isBadName, parseCSV } from "./uploads.js";
+import { ingestEvents, ingestResults, isBadName, parseCSV, mergeDuplicateFixtures, canonSport } from "./uploads.js";
 
 const app = express();
 // Stripe webhook needs the raw body for signature verification — mount BEFORE json parser.
@@ -37,6 +37,58 @@ const requireAdmin = (req, res, next) => {
   next();
 };
 
+// —— REAL access control for locked/Pro content ——————————————————
+// Previously, "locked" picks were only hidden by the frontend's own render
+// logic while the API sent full pick data (option + reasoning) to every
+// caller regardless of subscription — trivially bypassable via devtools or
+// by calling /api/fixtures directly. This resolves the caller's real tier
+// server-side so locked data never leaves the server in the first place.
+function callerAccess(req) {
+  const adminKey = process.env.ADMIN_KEY;
+  if (adminKey && req.get("x-admin-key") === adminKey) return { admin: true, pro: true };
+  const email = req.get("x-user-email");
+  if (email && isPro(email)) return { admin: false, pro: true };
+  return { admin: false, pro: false };
+}
+// Mirrors the frontend's own thresholds (FREE picks/sport + 4-star "max-bet"
+// lock) so free users see exactly the same teaser, but the underlying
+// option/reasoning never reaches an unauthenticated client.
+const FREE_PER_SPORT = 2;
+function unitsForEdge(edge) {
+  if (edge == null || edge <= 0) return 0;
+  if (edge >= 40) return 10; if (edge >= 25) return 9; if (edge >= 15) return 8;
+  if (edge >= 10) return 6; if (edge >= 5) return 4; if (edge >= 2) return 2;
+  return 1;
+}
+const starsForEdge = (edge) => Math.min(5, Math.ceil(unitsForEdge(edge) / 2));
+// Redact a single pick row down to what a locked/free viewer is allowed to see.
+function redactPick(p, unlocked) {
+  if (unlocked) return p;
+  const claude = p.model === "claude";
+  const maxBet = claude && starsForEdge(p.edge) >= 4;
+  if (!maxBet) return p; // below max-bet threshold: shown even to free/locked viewers
+  const { pick, reasoning, ...rest } = p;
+  return { ...rest, locked: true };
+}
+// Apply free-quota + redaction across a sport's fixture list, same order the
+// frontend renders in (status!=="final" fixtures count toward the FREE quota).
+function applyAccessGate(fixtures, access) {
+  if (access.pro || access.admin) return fixtures;
+  const bySport = {};
+  for (const f of fixtures) (bySport[f.sport] ||= []).push(f);
+  const out = [];
+  for (const sport of Object.keys(bySport)) {
+    let freeLeft = FREE_PER_SPORT;
+    for (const f of bySport[sport]) {
+      const countsTowardFree = f.status !== "final";
+      const unlockedFixture = !countsTowardFree || freeLeft > 0;
+      if (countsTowardFree && unlockedFixture) freeLeft--;
+      out.push({ ...f, picks: (f.picks || []).map((p) => redactPick(p, unlockedFixture)) });
+    }
+  }
+  return out;
+}
+
 // —— API for the React frontend ——————————————————
 // —— FEED HYGIENE ————————————————————————————————————
 // Two rules the public feed must never break:
@@ -59,15 +111,17 @@ function feedReject(f) {
 app.get("/api/value", (req, res) => {
   const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 60));
   const rows = q.valuePicks.all({ limit: limit * 3 }).filter((r) => !feedReject({ ...r, status: "upcoming" }));
+  const access = callerAccess(req);
   const seen = new Set(), out = [];
   for (const r of rows) {                        // one entry per fixture — its best market
     if (seen.has(r.id)) continue;
     seen.add(r.id);
-    out.push({ id: r.id, sport: r.sport, comp: r.comp, home: r.home, away: r.away, kickoff: r.kickoff,
+    const row = { id: r.id, sport: r.sport, comp: r.comp, home: r.home, away: r.away, kickoff: r.kickoff,
                market: r.market, pick: r.pick, edge: r.edge, probability: r.probability, price: r.price,
                closing: r.closing_price ?? null,
                clv: (r.price > 1 && r.closing_price > 1) ? Math.round((r.price / r.closing_price - 1) * 1000) / 10 : null,
-               reasoning: r.reasoning || null });
+               reasoning: r.reasoning || null };
+    out.push(redactPick({ ...row, model: "claude" }, access.pro || access.admin));
     if (out.length >= limit) break;
   }
   res.json(out);
@@ -82,7 +136,7 @@ app.get("/api/fixtures", (req, res) => {
     odds: q.oddsFor.all(f.id),
     picks: q.picksFor.all(f.id),
   }));
-  res.json(fixtures);
+  res.json(applyAccessGate(fixtures, callerAccess(req)));
 });
 
 app.get("/api/leaderboard", (req, res) => {
@@ -140,6 +194,18 @@ app.post("/api/stripe/create-checkout-session", async (req, res) => {
   } catch (e) { console.error("[checkout]", e.message); res.status(400).json({ error: e.message }); }
 });
 
+// Called by the frontend right after Stripe redirects back with ?session_id=...
+// Confirms payment actually completed and returns the paying email so the
+// client can persist it (and send it as x-user-email on future requests).
+// This is what makes Pro survive a page refresh instead of resetting.
+app.get("/api/stripe/session", async (req, res) => {
+  try {
+    const email = await emailForSession(req.query.session_id);
+    if (!email) return res.status(400).json({ error: "session not found or not paid" });
+    res.json({ email, pro: isPro(email) });
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
 // High-selectivity auto-pick: scan every priced game, take the single best QUALIFYING edge.
 // Sits out entirely when nothing clears the bar — no forced daily bet.
 const MISSION_MIN_EDGE = Number(process.env.MISSION_MIN_EDGE) || 4;    // %
@@ -190,7 +256,7 @@ app.get("/api/health", (_, res) => res.json({ ok: true }));
 // features that call routes it doesn't have would 404 with no explanation —
 // instead the UI reads these flags and says exactly what's missing.
 const BUILD = "2026-07-19b";   // bump on every deploy so /api/version proves which code is live
-const CAPABILITIES = ["mission-auto", "auto-settle", "purge-junk", "reset", "showdown-bulk", "feed-hygiene", "value-board", "undated-uploads", "schema-migrations"];
+const CAPABILITIES = ["mission-auto", "auto-settle", "purge-junk", "reset", "showdown-bulk", "feed-hygiene", "value-board", "undated-uploads", "schema-migrations", "dedupe", "settle-stats"];
 app.get("/api/version", (_, res) => res.json({ build: BUILD, capabilities: CAPABILITIES, resetOnBoot: process.env.RESET_ON_BOOT || null }));
 
 // External-cron endpoint: wakes the server and runs the full cycle.
@@ -247,8 +313,30 @@ app.get("/api/track", (req, res) => {
 });
 
 // distinct markets present (for the per-market leaderboard selector)
+// Global headline stats for the hero row — deliberately NOT scoped to any
+// single sport, so it doesn't read "0 games priced" just because whichever
+// sport tab happens to be selected/default has no fixtures yet.
+app.get("/api/stats/hero", (_, res) => {
+  const row = db.prepare(`
+    SELECT
+      COUNT(DISTINCT f.id) AS games_priced,
+      SUM(CASE WHEN p.model='claude' AND p.edge IS NOT NULL AND p.edge > 0 THEN 1 ELSE 0 END) AS value_edges,
+      MAX(CASE WHEN p.model='claude' THEN p.edge END) AS best_edge
+    FROM fixtures f
+    JOIN picks p ON p.fixture_id = f.id
+    WHERE f.status != 'final' AND p.model='claude' AND p.pick IS NOT NULL
+  `).get();
+  res.json({
+    gamesPriced: row.games_priced || 0,
+    valueEdges: row.value_edges || 0,
+    bestEdge: row.best_edge ?? null,
+  });
+});
+
 app.get("/api/sports", (_, res) => {
-  res.json(q.distinctSports.all().map((r) => r.sport));
+  const seen = new Set();
+  for (const r of q.distinctSports.all()) seen.add(canonSport(r.sport));
+  res.json([...seen]);
 });
 
 app.get("/api/markets", (req, res) => {
@@ -440,7 +528,24 @@ app.post("/api/compounding/settle", requireAdmin, (req, res) => {
 
 // POST the CSV text with Content-Type: text/csv
 // finished-but-unsettled games (for the manual settle panel)
-app.get("/api/unsettled", requireAdmin, (_, res) => res.json(q.unsettledPast.all()));
+app.get("/api/unsettled", requireAdmin, async (_, res) => {
+  const { STAT_FOR, STAT_LABEL } = await import("./jobs.js");
+  const rows = q.unsettledPast.all().map((f) => {
+    // every ungraded pick on this fixture, with the market/line so the admin can
+    // see what is actually being settled — and which need a number of their own.
+    const picks = q.picksFor.all(f.id)
+      .filter((p) => p.correct == null)
+      .map((p) => {
+        const stat = STAT_FOR(p.market);
+        return { market: p.market, pick: p.pick, price: p.price, edge: p.edge,
+                 stat, statLabel: stat ? STAT_LABEL[stat] : null };
+      });
+    const needs = [...new Set(picks.map((p) => p.stat).filter(Boolean))]
+      .map((k) => ({ key: k, label: STAT_LABEL[k] }));
+    return { ...f, picks, needs };
+  });
+  res.json(rows);
+});
 
 // Admin: delete one fixture (and its picks/odds) — for junk rows or long-finished games
 app.post("/api/fixture/delete", requireAdmin, (req, res) => {
@@ -463,6 +568,12 @@ app.post("/api/clear-finished", requireAdmin, (_, res) => {
   }
   console.log(`[clear-finished] deleted ${n} games`);
   res.json({ ok: true, deleted: n });
+});
+
+// Admin: fold duplicate fixtures (same teams, same day, different spelling) into one.
+app.post("/api/dedupe", requireAdmin, (_, res) => {
+  try { res.json({ ok: true, ...mergeDuplicateFixtures() }); }
+  catch (e) { console.error("[dedupe]", e.message); res.status(400).json({ error: e.message }); }
 });
 
 // Admin: purge parse-junk already in the DB — fixtures whose "names" are prices,
@@ -548,19 +659,26 @@ app.post("/api/reset", requireAdmin, (req, res) => {
 // settle one game by typing the final score — grades every score-derivable pick
 app.post("/api/settle", requireAdmin, (req, res) => {
   try {
-    const { id, hs, as } = req.body || {};
+    const { id, hs, as, stats } = req.body || {};
     const H = Number(hs), A = Number(as);
     if (!id || Number.isNaN(H) || Number.isNaN(A)) return res.status(400).json({ error: "need id, hs, as" });
     const f = q.fixtureById ? q.fixtureById.get(id) : db.prepare("SELECT * FROM fixtures WHERE id=?").get(id);
     if (!f) return res.status(404).json({ error: "fixture not found" });
     markFinal.run({ id, score: `${H}-${A}` });
-    let graded = 0, skipped = 0;
+    let graded = 0, pushed = 0;
+    const pending = [];
     for (const pk of q.picksFor.all(id)) {
-      const c = correctFromScore(pk.market, pk.pick, H, A, f.home, f.away);
+      let c = correctFromScore(pk.market, pk.pick, H, A, f.home, f.away);
+      if (c == null) {
+        // market the scoreline can't decide — use the number typed for it, if given
+        const key = STAT_FOR(pk.market);
+        if (key && stats && stats[key] != null && stats[key] !== "") c = correctFromStat(pk.market, pk.pick, stats[key]);
+      }
       if (c != null) { gradePick.run({ correct: c, fixture_id: id, model: pk.model, market: pk.market }); graded++; }
-      else skipped++;
+      else if (STAT_FOR(pk.market)) pending.push(`${pk.market} (needs ${STAT_LABEL[STAT_FOR(pk.market)]})`);
+      else pushed++;
     }
-    res.json({ ok: true, score: `${H}-${A}`, graded, skipped });
+    res.json({ ok: true, score: `${H}-${A}`, graded, pushed, pending });
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
 

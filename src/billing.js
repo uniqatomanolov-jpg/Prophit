@@ -22,13 +22,21 @@ export async function createCheckout({ plan, email }) {
     line_items: [{ price, quantity: 1 }],
     customer_email: email || undefined,
     allow_promotion_codes: true,
-    success_url: `${SITE_URL}/?sub=success`,
+    success_url: `${SITE_URL}/?sub=success&session_id={CHECKOUT_SESSION_ID}`,
     cancel_url: `${SITE_URL}/?sub=cancel`,
   });
   return session.url;
 }
 
-// Verify + handle a raw webhook payload. `rawBody` must be the untouched Buffer.
+// Look up the email that completed a given checkout session (called right
+// after Stripe redirects back with ?session_id=... on success). Never trust
+// a client-supplied email for Pro access without this kind of round trip.
+export async function emailForSession(sessionId) {
+  if (!stripe || !sessionId) return null;
+  const session = await stripe.checkout.sessions.retrieve(sessionId);
+  if (session.payment_status !== "paid" && session.status !== "complete") return null;
+  return session.customer_details?.email || session.customer_email || null;
+}
 export async function handleWebhook(rawBody, signature) {
   if (!stripe) return { ok: false, reason: "billing off" };
   let event;

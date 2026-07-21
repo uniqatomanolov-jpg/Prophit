@@ -13,7 +13,12 @@ import { isBadName } from "./uploads.js";
 const SPORT_CFG = {
   soccer: { leagueId: (process.env.LEAGUE_IDS || "1").split(",")[0], season: process.env.SEASON || "2026" },
 };
-const ENABLED = (process.env.ENABLED_SPORTS || "soccer").split(",").map((s) => s.trim());
+const ENABLED = (process.env.ENABLED_SPORTS || "soccer")
+  .split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
+{
+  const unknown = ENABLED.filter((k) => !SPORTS[k]);
+  if (unknown.length) console.warn(`[config] ENABLED_SPORTS lists unknown sport(s): ${unknown.join(", ")} — known keys: ${Object.keys(SPORTS).join(", ")}`);
+}
 
 const norm = (f, sport) => ({
   id: String(f.id).startsWith(sport) ? String(f.id) : `${sport}:${f.id}`,
@@ -169,8 +174,20 @@ export function correctFromScore(market, pick, hs, as, home, away) {
   }
   if (market === "btts") return (p.startsWith("y") ? (hs > 0 && as > 0) : !(hs > 0 && as > 0)) ? 1 : 0;
   if (market === "cs") return p.replace(/\s/g, "") === `${hs}-${as}` ? 1 : 0;
-  if (/corner|card|shot|foul|tackle/.test(market)) return null;   // not derivable from the scoreline
-  if (/ou|total|goals/.test(market) && num != null && /over|under/.test(p)) {
+  if (/corner|card|shot|foul|tackle|180|checkout|ace|frame|break/.test(market)) return null; // needs its own stat
+  // HANDICAP / SPREAD — derivable from the scoreline once the line is applied.
+  // "home -1.5" / "Lakers +6.5" / "away -2": the pick names a side and a margin.
+  if (/spread|hcp|handicap|^ah$|line/.test(market) && num != null) {
+    const line = parseFloat(num);
+    const backedHome = p.startsWith("home") || nrm(p).startsWith(nrm(home));
+    const backedAway = p.startsWith("away") || nrm(p).startsWith(nrm(away));
+    if (!backedHome && !backedAway) return null;
+    const margin = backedHome ? (hs - as) : (as - hs);
+    const adj = margin + line;                       // line is signed in the pick text
+    if (adj === 0) return null;                      // exact push — void, not a loss
+    return adj > 0 ? 1 : 0;
+  }
+  if (/ou|total|goals|points/.test(market) && num != null && /over|under/.test(p)) {
     const line = parseFloat(num);
     if (total === line) return null;                       // push
     return (p.includes("over") ? total > line : total < line) ? 1 : 0;
@@ -253,7 +270,9 @@ export async function gradeFinished() {
   await settleManualFromScores();          // manual games settle themselves by score
   await syncFixtures(); // refresh statuses
   for (const f of q.finishedUngraded.all()) {
-    const adapter = adapterFor(SPORTS[f.sport].provider);
+    const cfg = SPORTS[f.sport];
+    if (!cfg) { continue; }                 // uploaded sport with no config → settled by score/admin, not a feed
+    const adapter = adapterFor(cfg.provider);
     let result;
     try { result = await adapter.fetchResult({ id: f.id.split(":").slice(1).join(":") || f.id, raw: f.raw, home: f.home, away: f.away, sport: f.sport }); }
     catch (e) { console.warn(`[grade] result failed ${f.id}: ${e.message}`); continue; }
@@ -272,4 +291,39 @@ export async function gradeFinished() {
     }
     console.log(`[grade:${f.sport}] settled ${f.comp}`);
   }
+}
+
+// —— STAT-BASED SETTLEMENT ————————————————————————————————
+// Markets that the scoreline can never decide: corners, cards, shots, darts 180s,
+// snooker frames, tennis aces. Each needs its own final number, typed at settle time.
+// STAT_FOR maps a market id to the stat key the admin panel asks for.
+export const STAT_FOR = (market) => {
+  const m = String(market || "").toLowerCase();
+  if (/corner/.test(m)) return "corners";
+  if (/card|booking/.test(m)) return "cards";
+  if (/180/.test(m)) return "s180s";
+  if (/checkout/.test(m)) return "checkout";
+  if (/ace/.test(m)) return "aces";
+  if (/frame/.test(m)) return "frames";
+  if (/shot/.test(m)) return "shots";
+  if (/foul/.test(m)) return "fouls";
+  if (/tackle/.test(m)) return "tackles";
+  if (/break/.test(m)) return "breaks";
+  return null;
+};
+export const STAT_LABEL = {
+  corners: "total corners", cards: "total cards", s180s: "total 180s",
+  checkout: "highest checkout", aces: "total aces", frames: "total frames",
+  shots: "total shots", fouls: "total fouls", tackles: "total tackles", breaks: "total breaks",
+};
+
+export function correctFromStat(market, pick, value) {
+  if (value == null || Number.isNaN(Number(value))) return null;
+  const v = Number(value);
+  const p = String(pick).toLowerCase().trim();
+  const num = (p.match(/-?\d+(\.\d+)?/) || [])[0];
+  if (num == null || !/over|under/.test(p)) return null;
+  const line = parseFloat(num);
+  if (v === line) return null;                       // push
+  return (p.includes("over") ? v > line : v < line) ? 1 : 0;
 }

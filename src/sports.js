@@ -23,8 +23,20 @@ export const SPORTS = {
   nhl:     { family: "h2h", provider: "manual", label: "Ice Hockey", markets: ["ml"] },
   mma:     { family: "h2h", provider: "manual", label: "MMA",      markets: ["ml"] },
   cricket: { family: "h2h", provider: "manual", label: "Cricket",  markets: ["ml"] },
-  f1:      { family: "race", provider: "manual", label: "Formula 1", markets: ["winner", "podium"] },
-  motogp:  { family: "race", provider: "manual", label: "MotoGP",  markets: ["winner", "podium"] },
+  f1:      { family: "race", provider: "manual", label: "Formula 1", markets: ["winner", "podium", "top6", "top10"] },
+  motogp:  { family: "race", provider: "manual", label: "MotoGP",  markets: ["winner", "podium", "top6", "top10"] },
+  // sports that arrive by upload rather than a feed — configured so the prompt
+  // builder, the market list and the grading loop all recognise them.
+  basketball:        { family: "h2h", provider: "manual", label: "Basketball",        markets: ["ml", "total", "spread"] },
+  baseball:          { family: "h2h", provider: "manual", label: "Baseball",          markets: ["ml", "total"] },
+  rugby:             { family: "h2h", provider: "manual", label: "Rugby",             markets: ["ml", "x12", "total", "spread"] },
+  volleyball:        { family: "h2h", provider: "manual", label: "Volleyball",        markets: ["ml", "total"] },
+  boxing:            { family: "h2h", provider: "manual", label: "Boxing",            markets: ["ml", "total"] },
+  american_football: { family: "h2h", provider: "manual", label: "American Football", markets: ["ml", "total", "spread"] },
+  handball:          { family: "h2h", provider: "manual", label: "Handball",          markets: ["ml", "x12", "total"] },
+  ice_hockey:        { family: "h2h", provider: "manual", label: "Ice Hockey",        markets: ["ml", "x12", "total"] },
+  table_tennis:      { family: "h2h", provider: "manual", label: "Table Tennis",      markets: ["ml", "total"] },
+  golf:              { family: "race", provider: "manual", label: "Golf",             markets: ["winner", "top6", "top10"] },
 };
 
 // Human-readable market metadata used to build the AI prompt per sport.

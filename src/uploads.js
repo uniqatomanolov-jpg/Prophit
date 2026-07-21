@@ -31,7 +31,57 @@ export function parseCSV(text) {
 }
 
 const slug = (s) => String(s).trim().replace(/[^\p{L}\p{N}.-]+/gu, "-").replace(/-+/g, "-").replace(/^-|-$/g, "");
-export const manualId = (r) => `manual:${slug(r.sport)}:${slug(r.home)}_v_${slug(r.away)}`;
+
+// —— IDENTITY SLUG ————————————————————————————————————————
+// The fixture id must be stable across the spelling drift between uploads:
+// "Gian Van Veen" / "Gian van Veen", "Querétaro FC" / "Queretaro FC".
+// Case, accents, punctuation and club suffixes are all stripped for the ID only —
+// the display name stays exactly as it was uploaded.
+const CLUB_WORDS = /\b(fc|cf|sc|ac|afc|cd|ud|sv|bk|if|fk|club|deportivo)\b/g;
+export const idSlug = (s) => String(s == null ? "" : s)
+  .normalize("NFD").replace(/[\u0300-\u036f]/g, "")     // Querétaro → Queretaro
+  .toLowerCase()                                        // Van → van
+  .replace(/[^a-z0-9 ]+/g, " ")
+  .replace(CLUB_WORDS, " ")                             // Queretaro FC → Queretaro
+  .replace(/\s+/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "");
+export const manualId = (r) => `manual:${idSlug(r.sport)}:${idSlug(r.home)}_v_${idSlug(r.away)}`;
+
+// —— MERGE EXISTING DUPLICATES ————————————————————————————
+// Fixtures stored before the identity fix (or from a source that spells a name
+// differently) sit in the DB as separate rows. Fold them into one: the survivor
+// is the row with the most picks, and its odds/picks absorb the others'.
+export function mergeDuplicateFixtures() {
+  const all = db.prepare("SELECT id, sport, home, away, kickoff, status FROM fixtures").all();
+  const groups = {};
+  for (const f of all) {
+    const day = String(f.kickoff || "").slice(0, 10);
+    const key = `${idSlug(f.sport)}|${idSlug(f.home)}|${idSlug(f.away)}|${day}`;
+    (groups[key] = groups[key] || []).push(f);
+  }
+  let merged = 0; const examples = [];
+  const nPicks = db.prepare("SELECT COUNT(*) n FROM picks WHERE fixture_id=?");
+  for (const key in groups) {
+    const g = groups[key];
+    if (g.length < 2) continue;
+    g.sort((a, b) => nPicks.get(b.id).n - nPicks.get(a.id).n || String(a.id).localeCompare(String(b.id)));
+    const keep = g[0];
+    for (const dupe of g.slice(1)) {
+      db.transaction(() => {
+        // move anything the survivor doesn't already have, then drop the duplicate
+        db.prepare("UPDATE OR IGNORE odds SET fixture_id=? WHERE fixture_id=?").run(keep.id, dupe.id);
+        db.prepare("UPDATE OR IGNORE picks SET fixture_id=? WHERE fixture_id=?").run(keep.id, dupe.id);
+        db.prepare("UPDATE OR IGNORE outcomes SET fixture_id=? WHERE fixture_id=?").run(keep.id, dupe.id);
+        db.prepare("DELETE FROM odds WHERE fixture_id=?").run(dupe.id);
+        db.prepare("DELETE FROM picks WHERE fixture_id=?").run(dupe.id);
+        db.prepare("DELETE FROM fixtures WHERE id=?").run(dupe.id);
+      })();
+      merged++;
+      if (examples.length < 5) examples.push(`${dupe.home} v ${dupe.away} → ${keep.home} v ${keep.away}`);
+    }
+  }
+  if (merged) console.log(`[dedupe] merged ${merged} duplicate fixtures`);
+  return { merged, examples };
+}
 
 const MONTHS = { jan:1,feb:2,mar:3,apr:4,may:5,jun:6,jul:7,aug:8,sep:9,oct:10,nov:11,dec:12 };
 const YEAR = new Date().getFullYear();
@@ -246,7 +296,60 @@ function normBetanoMatch(rows) {
   return out.some((o) => o.market === "x12") ? out : null;
 }
 
-const RACE_SPORTS = new Set(["f1", "motogp", "nascar", "golf", "cycling"]);
+const RACE_SPORTS = new Set(["f1", "motogp", "nascar", "golf", "cycling", "horse_racing"]);
+// bookmakers and screenshots spell the same sport a dozen ways
+const SPORT_ALIASES = {
+  "formula 1": "f1", "formula1": "f1", "formula one": "f1", "f1 racing": "f1",
+  auto: "f1", motor: "f1", motorsport: "f1", "motor racing": "f1", racing: "f1",
+  "moto gp": "motogp", motorcycle: "motogp",
+  "horse racing": "horse_racing", horses: "horse_racing",
+  // one sport, one sidebar entry — these all used to arrive as separate keys
+  football: "soccer", futbol: "soccer", "association football": "soccer",
+  "american football": "american_football", nfl: "american_football", "am football": "american_football",
+  basket: "basketball", nba: "basketball", "basket ball": "basketball",
+  mlb: "baseball", "base ball": "baseball",
+  nhl: "ice_hockey", hockey: "ice_hockey", "ice hockey": "ice_hockey",
+  "table tennis": "table_tennis", "ping pong": "table_tennis", tabletennis: "table_tennis",
+  ufc: "mma", "mixed martial arts": "mma",
+};
+export function canonSport(x) {
+  const v = String(x == null ? "" : x).trim().toLowerCase().replace(/[_-]+/g, " ");
+  return SPORT_ALIASES[v] || v.replace(/\s+/g, "_");
+}
+// Shared text→sport heuristics. Used by every parser that has to guess a
+// sport from free text (competition name, market name, matchup string)
+// instead of trusting an explicit "sport" column. IMPORTANT: order matters —
+// race/outright markets are checked first so an F1/MotoGP "Podium Finish",
+// "Winner", "Top 6" etc. board never gets swallowed by a h2h-sport keyword
+// that happens to also appear in the same text.
+const SPORT_HINTS = [
+  [/\bf1\b|formula ?1|formula ?one|grand prix|\bgp\b|pole position|podium finish/i, "f1"],
+  [/moto ?gp/i, "motogp"],
+  [/nascar/i, "nascar"],
+  [/\bpga\b|masters golf|the open\b/i, "golf"],
+  [/atp|wta|wimbledon|challenger|us open|roland|australian open/i, "tennis"],
+  [/nba|eurobasket|\bbasket\b|fiba/i, "nba"],
+  [/volley/i, "volleyball"],
+  [/darts|\bpdc\b|world matchplay/i, "darts"],
+  [/snooker/i, "snooker"],
+  [/ufc|\bmma\b|\bcage\b/i, "mma"],
+  [/boxing|heavyweight|\bwbc\b|\bwba\b|\bibf\b/i, "boxing"],
+  [/table tennis|tt cup|liga pro/i, "tabletennis"],
+  [/esport|cs2|counter.strike|\bdota\b|league of legends|valorant/i, "esports"],
+  [/nhl|hockey|khl/i, "nhl"],
+  [/mlb|baseball/i, "mlb"],
+  [/cricket|t20|\bipl\b|\bodi\b/i, "cricket"],
+  [/handball/i, "handball"],
+];
+// Try every hint against a blob of free text; null if nothing matches.
+// Never used to override an explicit sport column — only to fill one in.
+function sniffSport(text) {
+  for (const [rx, sp] of SPORT_HINTS) if (rx.test(text)) return sp;
+  return null;
+}
+// how many runners a market pays out on — the implied probabilities of a
+// complete field sum to roughly this number, not to 1.
+const RACE_PLACES = { winner: 1, outright: 1, pole: 1, fastestlap: 1, podium: 3, top3: 3, top6: 6, top10: 10 };
 
 
 const WD = { sun:0, mon:1, tue:2, wed:3, thu:4, fri:5, sat:6 };
@@ -280,8 +383,16 @@ function normSimplePlayers(rows, defSport){
     var r=rows[i]; var h=(r[iP1]||"").trim(), a=(r[iP2]||"").trim();
     var o1=num(r[iO1]), o2=num(r[iO2]);
     if(!h||!a||o1==null||o2==null)continue;
-    var sport=(iSport>=0&&r[iSport])?String(r[iSport]).toLowerCase().trim():(defSport||"darts");
-    var comp=(iComp>=0&&r[iComp])?r[iComp]:(sport.charAt(0).toUpperCase()+sport.slice(1));
+    var comp=(iComp>=0&&r[iComp])?String(r[iComp]).trim():"";
+    // Never hard-default an unlabeled row to an arbitrary sport (that's how an
+    // F1 "Podium Finish" outright board with no sport column ended up filed
+    // under Darts). Priority: explicit sport column > sniff from competition
+    // + matchup text > caller-supplied defSport > drop the row entirely.
+    var sport=(iSport>=0&&r[iSport])?String(r[iSport]).toLowerCase().trim():null;
+    if(!sport)sport=sniffSport(comp+" "+h+" "+a);
+    if(!sport&&defSport)sport=defSport;
+    if(!sport)continue; // unknown sport — reject rather than guess
+    if(!comp)comp=sport.charAt(0).toUpperCase()+sport.slice(1);
     var kickoff=(iTime>=0&&r[iTime])?whenToKickoff(r[iTime]):futureSlot();
     out.push({sport:sport,kickoff:kickoff,competition:comp,home:h,away:a,market:"ml",option:h,odds:o1});
     out.push({sport:sport,kickoff:kickoff,competition:comp,home:h,away:a,market:"ml",option:a,odds:o2});
@@ -304,23 +415,7 @@ function normSpreadexList(rows) {
     if (o1 == null || o2 == null) continue;
     const comp = "";
     const [home, away] = match.split(" v ").map((x) => x.trim());
-    const SPORT_HINTS = [
-      [/atp|wta|wimbledon|challenger|us open|roland|australian/i, "tennis"],
-      [/nba|eurobasket|basket|fiba/i, "nba"],
-      [/volley/i, "volleyball"],
-      [/darts|pdc/i, "darts"],
-      [/snooker/i, "snooker"],
-      [/ufc|mma|cage/i, "mma"],
-      [/boxing|heavyweight|wbc|wba|ibf/i, "boxing"],
-      [/table tennis|tt cup|liga pro/i, "tabletennis"],
-      [/esport|cs2|counter.strike|dota|league of legends|valorant/i, "esports"],
-      [/nhl|hockey|khl/i, "nhl"],
-      [/mlb|baseball/i, "mlb"],
-      [/cricket|t20|ipl|odi/i, "cricket"],
-      [/handball/i, "handball"],
-    ];
-    let sport = null;
-    var hint = comp + " " + match; for (const [rx, sp] of SPORT_HINTS) { if (rx.test(hint)) { sport = sp; break; } }
+    const sport = sniffSport(comp + " " + match);
     if (!sport) continue;
     const kickoff = whenToKickoff(r[1]);
     out.push({ sport, kickoff, competition: comp, home, away, market: "ml", option: home, odds: o1 });
@@ -510,13 +605,14 @@ export function ingestEvents(csvText) {
   if (rows) rows = rows.filter((r) => String(r.sport).toLowerCase() !== "soccer" || KEEP_SOCCER.has(r.market));
   if (!rows) rows = parseCSV(csvText);
   // ---- GLOBAL DATA-INTEGRITY GATES (protect every upload source) ----
-  const rejected = { noName: 0, badDate: 0, alreadyPlayed: 0, noOdds: 0, badMargin: 0 };
-  const assumed = { date: 0 };
+  const rejected = { noName: 0, badDate: 0, alreadyPlayed: 0, noOdds: 0, badMargin: 0, outrightAsH2H: 0 };
+  const assumed = { date: 0, dupOptions: 0 };
   const STALE_MS = (Number(process.env.UPLOAD_GRACE_HOURS) || 6) * 3600e3;
   if (rows) {
     // 1) NAMES: both competitors must be real names. A row whose "home"/"away"
     //    is a price ("2.25"), a market label ("away") or a league header is a
     //    column-misalignment in the source file — drop it, never store it.
+    for (const r of rows) if (r.sport) r.sport = canonSport(r.sport);
     rows = rows.filter((r) => {
       const race = RACE_SPORTS.has(String(r.sport).toLowerCase());
       const bad = isBadName(r.home) || (!race && isBadName(r.away));
@@ -554,7 +650,18 @@ export function ingestEvents(csvText) {
       return true;
     });
 
-    // 4) MARGIN sanity: reject impossible 2-way markets (e.g. 1.10 vs 1.10 → 182% book).
+    // 4) DUPLICATE SELECTIONS: the same fixture+market+option listed twice (the
+    //    usual cause is one screenshot read twice, or two spellings of a name).
+    //    Keep the last price. Left in place they double-count in the margin check
+    //    below and would get the whole market rejected as an "impossible book".
+    const bySel = new Map();
+    for (const r of rows) bySel.set(`${manualId(r)}|${r.market}|${String(r.option).toLowerCase().trim()}`, r);
+    if (bySel.size !== rows.length) {
+      assumed.dupOptions = rows.length - bySel.size;
+      rows = [...bySel.values()];
+    }
+
+    // 5) MARGIN sanity: reject impossible 2-way markets (e.g. 1.10 vs 1.10 → 182% book).
     //    Group a fixture+market's options, check implied-probability sum.
     const groups = {};
     for (const r of rows) { const k = manualId(r) + "|" + r.market; (groups[k] = groups[k] || []).push(r); }
@@ -567,14 +674,39 @@ export function ingestEvents(csvText) {
       // a parse error. A sum BELOW 1 only means "typo" when the book is complete —
       // a 1X2 upload missing the draw leg legitimately sums under 1, so only apply
       // the lower bound when we have the full set of options for the market.
-      const mkt = String(g[0].market || "").toLowerCase();
+      const mkt = String(g[0].market || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+      const places = RACE_PLACES[mkt];
+      if (places) {
+        // OUTRIGHT FIELD (race winner, podium, top6, top10). The implied
+        // probabilities of an N-place market sum to about N, not to 1 — a 20-car
+        // podium market legitimately sums near 3.0. Judging it against a 1.35
+        // two-way ceiling is what rejected every Formula 1 upload.
+        // Only the per-runner price and a generous ceiling are meaningful here,
+        // and a partial field (screenshot cut off) must still be accepted.
+        if (!ok || sum > places * 2.2) bad.add(k);
+        continue;
+      }
       const expected = THREE_WAY.has(mkt) ? 3 : 2;
       const complete = g.length >= expected;
       if (!ok || sum > 1.35 || (complete && sum < 0.90)) bad.add(k);
     }
     if (bad.size) { const before = rows.length; rows = rows.filter((r) => !bad.has(manualId(r) + "|" + r.market)); rejected.badMargin = before - rows.length; }
   }
-  const rejectedTotal = rejected.noName + rejected.badDate + rejected.alreadyPlayed + rejected.noOdds + rejected.badMargin;
+  // OUTRIGHT MISREAD: a podium/top-N/outright field that arrived as head-to-heads.
+  // Two competitors in the same race are not opponents, and storing them as a
+  // matchup produces a fake fixture that can never settle. Reject with a reason
+  // rather than let it into the feed.
+  if (rows) {
+    const OUTRIGHT_RX = /podium|top ?\d|outright|race winner|to win (the )?(race|title|tournament)|winner without/i;
+    const before = rows.length;
+    rows = rows.filter((r) => {
+      const looksOutright = OUTRIGHT_RX.test(String(r.comp || r.competition || "")) || OUTRIGHT_RX.test(String(r.market || "")) || OUTRIGHT_RX.test(String(r.option || ""));
+      const isH2H = r.away && String(r.away).trim() !== "";
+      return !(looksOutright && isH2H);
+    });
+    rejected.outrightAsH2H = before - rows.length;
+  }
+  const rejectedTotal = rejected.noName + rejected.badDate + rejected.alreadyPlayed + (rejected.outrightAsH2H || 0) + rejected.noOdds + rejected.badMargin;
   if (rejectedTotal) console.log(`[upload] rejected ${rejectedTotal} rows —`, rejected);
   if (assumed.date) console.log(`[upload] ${assumed.date} rows had no readable date — scheduled for ${futureSlot()}`);
   const seen = new Set(); let fixtures = 0, odds = 0;
@@ -608,7 +740,8 @@ export function ingestEvents(csvText) {
     }
   });
   tx();
-  return { fixtures, odds, rows: rows.length, rejected, rejectedTotal, assumed };
+  const dedupe = mergeDuplicateFixtures();      // an upload never leaves twins behind
+  return { fixtures, odds, rows: rows.length, rejected, rejectedTotal, assumed, merged: dedupe.merged };
 }
 
 const norm = (x) => String(x).trim().toLowerCase();
