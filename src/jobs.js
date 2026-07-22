@@ -174,7 +174,7 @@ export function correctFromScore(market, pick, hs, as, home, away) {
   }
   if (market === "btts") return (p.startsWith("y") ? (hs > 0 && as > 0) : !(hs > 0 && as > 0)) ? 1 : 0;
   if (market === "cs") return p.replace(/\s/g, "") === `${hs}-${as}` ? 1 : 0;
-  if (/corner|card|shot|foul|tackle|180|checkout|ace|frame|break/.test(market)) return null; // needs its own stat
+  if (/corner|card|shot|foul|tackle|180|checkout|ace|games|break/.test(market)) return null; // needs its own stat
   // HANDICAP / SPREAD — derivable from the scoreline once the line is applied.
   // "home -1.5" / "Lakers +6.5" / "away -2": the pick names a side and a margin.
   if (/spread|hcp|handicap|^ah$|line/.test(market) && num != null) {
@@ -186,6 +186,14 @@ export function correctFromScore(market, pick, hs, as, home, away) {
     const adj = margin + line;                       // line is signed in the pick text
     if (adj === 0) return null;                      // exact push — void, not a loss
     return adj > 0 ? 1 : 0;
+  }
+  // legs (darts) and frames (snooker) sum straight from the match score —
+  // a 10-8 Matchplay result IS 18 legs. Tennis GAMES do not (score is in sets),
+  // so games_ou stays a stat market.
+  if (/legs|frames/.test(market) && num != null && /over|under/.test(p)) {
+    const line = parseFloat(num), tot = hs + as;
+    if (tot === line) return null;
+    return (p.includes("over") ? tot > line : tot < line) ? 1 : 0;
   }
   if (/ou|total|goals|points/.test(market) && num != null && /over|under/.test(p)) {
     const line = parseFloat(num);
@@ -304,6 +312,7 @@ export const STAT_FOR = (market) => {
   if (/card|booking/.test(m)) return "cards";
   if (/180/.test(m)) return "s180s";
   if (/checkout/.test(m)) return "checkout";
+  if (/games/.test(m)) return "games";
   if (/ace/.test(m)) return "aces";
   if (/frame/.test(m)) return "frames";
   if (/shot/.test(m)) return "shots";
@@ -313,7 +322,7 @@ export const STAT_FOR = (market) => {
   return null;
 };
 export const STAT_LABEL = {
-  corners: "total corners", cards: "total cards", s180s: "total 180s",
+  corners: "total corners", cards: "total cards", s180s: "total 180s", games: "total games",
   checkout: "highest checkout", aces: "total aces", frames: "total frames",
   shots: "total shots", fouls: "total fouls", tackles: "total tackles", breaks: "total breaks",
 };

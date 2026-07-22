@@ -164,7 +164,7 @@ export function mergeFuzzyTwins() {
 // fixtures — "Hungarian Grand Prix", "Podium Finish", "Formula 1 Race" — each
 // carrying the same drivers. Fold same-sport same-day away-less fixtures into
 // one, preferring the survivor whose name is an actual event, not a market.
-const MARKETISH_RX = /^(podium( finish)?|race winner|winner|top ?\d+( finish)?|outright|formula ?1( race)?|f1( race)?|motogp( race)?|grand prix)$/i;
+const MARKETISH_RX = /^(podium( finish)?|points( finish)?|race winner|winner|top ?\d+( finish)?|outright|fastest lap|pole( position)?|formula ?1( race)?|f1( race)?|motogp( race)?|grand prix)$/i;
 export function mergeRaceOutrights() {
   const RACE = ["f1", "motogp", "nascar", "golf", "cycling"];
   const nPicks = db.prepare("SELECT COUNT(*) n FROM picks WHERE fixture_id=?");
@@ -193,6 +193,33 @@ export function mergeRaceOutrights() {
         merged++;
         if (examples.length < 5) examples.push(`"${dupe.home}" \u2192 "${keep.home}"`);
       }
+    }
+  }
+  // second pass: a market-named race fixture ("Points Finish") whose assumed
+  // date landed on a DIFFERENT day than the real race still belongs to it —
+  // attach it to the nearest properly-named race in the same sport within 5 days.
+  for (const sport of RACE) {
+    const rows = db.prepare(
+      "SELECT id, home, kickoff FROM fixtures WHERE sport=? AND (away IS NULL OR away='')").all(sport);
+    const real = rows.filter((f) => !MARKETISH_RX.test(f.home));
+    const junk = rows.filter((f) => MARKETISH_RX.test(f.home));
+    for (const j of junk) {
+      const jt = Date.parse(String(j.kickoff || "").replace(" ", "T")) || 0;
+      let best = null, bestGap = 5 * 864e5 + 1;
+      for (const r of real) {
+        const gap = Math.abs((Date.parse(String(r.kickoff || "").replace(" ", "T")) || 0) - jt);
+        if (gap < bestGap) { bestGap = gap; best = r; }
+      }
+      if (!best) continue;
+      db.transaction(() => {
+        db.prepare("UPDATE OR IGNORE odds SET fixture_id=? WHERE fixture_id=?").run(best.id, j.id);
+        db.prepare("UPDATE OR IGNORE picks SET fixture_id=? WHERE fixture_id=?").run(best.id, j.id);
+        db.prepare("DELETE FROM odds WHERE fixture_id=?").run(j.id);
+        db.prepare("DELETE FROM picks WHERE fixture_id=?").run(j.id);
+        db.prepare("DELETE FROM fixtures WHERE id=?").run(j.id);
+      })();
+      merged++;
+      if (examples.length < 5) examples.push(`"${j.home}" \u2192 "${best.home}"`);
     }
   }
   if (merged) console.log(`[race-merge] ${merged} outright twins folded`, examples);

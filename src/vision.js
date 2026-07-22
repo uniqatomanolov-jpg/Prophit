@@ -11,6 +11,7 @@ const SYSTEM_PROMPT = [
   'OVER/UNDER LISTS (one row per match, two prices):',
   '{"sport":"soccer","competition":string,"home":string,"away":string,"kickoff":"YYYY-MM-DD HH:MM","market":"goals_ou","line":2.5,"odds":{"over":2.05,"under":1.72}}',
   'READ THE LINE OFF EACH ROW SEPARATELY — a list often mixes Over/Under 2.5 and Over/Under 3.5. Never copy one row\'s line onto another.',
+  'O/U MARKET NAMES ARE SPORT-SPECIFIC. "goals_ou" is FOOTBALL ONLY. Darts totals are LEGS -> market "legs_ou" (a 180s line -> "total180s"); snooker -> "frames_ou"; tennis -> "games_ou"; basketball/volleyball -> "total". An 18.5 line on a darts match is legs, never goals.',
   'Dates like "21/07 21:00" are day/month; a "Tomorrow"/"Today" section header applies to every row beneath it until the next header.',
   '',
   'OUTRIGHT / FIELD MARKETS (Formula 1, MotoGP, golf, cycling, NASCAR):',

@@ -118,7 +118,12 @@ function feedReject(f) {
 // happened to fit in the fixture list. Junk rows are filtered the same way.
 app.get("/api/value", (req, res) => {
   const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 60));
-  const rows = q.valuePicks.all({ limit: limit * 3 }).filter((r) => !feedReject({ ...r, status: "upcoming" }));
+  // an edge past this on a liquid market is almost always a misread line or a
+  // hallucinated probability, not free money — keep it off the customer board.
+  const MAX_EDGE = Number(process.env.VALUE_MAX_EDGE) || 15;
+  const rows = q.valuePicks.all({ limit: limit * 3 })
+    .filter((r) => !feedReject({ ...r, status: "upcoming" }))
+    .filter((r) => { if (r.edge > MAX_EDGE) { console.log(`[value] suppressed suspect edge ${r.edge}% — ${r.home} v ${r.away} ${r.market}`); return false; } return true; });
   const access = callerAccess(req);
   const seen = new Set(), out = [];
   for (const r of rows) {                        // one entry per fixture — its best market
