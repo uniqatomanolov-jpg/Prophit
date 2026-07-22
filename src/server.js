@@ -60,7 +60,10 @@ function unitsForEdge(edge) {
   if (edge >= 10) return 6; if (edge >= 5) return 4; if (edge >= 2) return 2;
   return 1;
 }
-const starsForEdge = (edge) => Math.min(5, Math.ceil(unitsForEdge(edge) / 2));
+// Star rating straight from edge. The old ceil(units/2) capped at 3 stars, so
+// the "max-bet (4★+) locks for free users" rule could never fire — the paywall
+// was silently vacuous. Thresholds now reach 5★.
+const starsForEdge = (edge) => (edge >= 8 ? 5 : edge >= 6 ? 4 : edge >= 4 ? 3 : edge >= 2 ? 2 : 1);
 // Redact a single pick row down to what a locked/free viewer is allowed to see.
 function redactPick(p, unlocked) {
   if (unlocked) return p;
@@ -72,8 +75,13 @@ function redactPick(p, unlocked) {
 }
 // Apply free-quota + redaction across a sport's fixture list, same order the
 // frontend renders in (status!=="final" fixtures count toward the FREE quota).
+// Launch mode: everything unlocked for everyone. One switch to turn the
+// paywall back on when the free-trial phase ends — set FREE_FOR_ALL=false in
+// the host env and redeploy; nothing else has to change.
+const FREE_FOR_ALL = String(process.env.FREE_FOR_ALL ?? "true").toLowerCase() !== "false";
+
 function applyAccessGate(fixtures, access) {
-  if (access.pro || access.admin) return fixtures;
+  if (FREE_FOR_ALL || access.pro || access.admin) return fixtures;
   const bySport = {};
   for (const f of fixtures) (bySport[f.sport] ||= []).push(f);
   const out = [];
@@ -121,7 +129,7 @@ app.get("/api/value", (req, res) => {
                closing: r.closing_price ?? null,
                clv: (r.price > 1 && r.closing_price > 1) ? Math.round((r.price / r.closing_price - 1) * 1000) / 10 : null,
                reasoning: r.reasoning || null };
-    out.push(redactPick({ ...row, model: "claude" }, access.pro || access.admin));
+    out.push(redactPick({ ...row, model: "claude" }, FREE_FOR_ALL || access.pro || access.admin));
     if (out.length >= limit) break;
   }
   res.json(out);
@@ -287,7 +295,7 @@ app.get(["/api/live", "/api/games"], (req, res) => {
 // instead the UI reads these flags and says exactly what's missing.
 const BUILD = "2026-07-19b";   // bump on every deploy so /api/version proves which code is live
 const CAPABILITIES = ["mission-auto", "auto-settle", "purge-junk", "reset", "showdown-bulk", "feed-hygiene", "value-board", "undated-uploads", "schema-migrations", "dedupe", "reclassify", "results-vision", "status-sweep", "reprice", "live-alias", "settle-stats"];
-app.get("/api/version", (_, res) => res.json({ build: BUILD, capabilities: CAPABILITIES, resetOnBoot: process.env.RESET_ON_BOOT || null }));
+app.get("/api/version", (_, res) => res.json({ build: BUILD, capabilities: CAPABILITIES, resetOnBoot: process.env.RESET_ON_BOOT || null, freeForAll: FREE_FOR_ALL }));
 
 // External-cron endpoint: wakes the server and runs the full cycle.
 // Point a free pinger (e.g. cron-job.org) at GET /api/cron every few hours.
