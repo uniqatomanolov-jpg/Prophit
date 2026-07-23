@@ -273,9 +273,12 @@ export async function gradeFinished() {
     const { autoSettle, resultsFeedStatus } = await import("./results.js");
     if (resultsFeedStatus().enabled) {
       const r = await autoSettle({});
+      report.autoSettled = r.settled || 0; report.autoGraded = r.graded || 0; report.unmatched = r.unmatchedCount || 0;
+      report.unmatchedList = (r.unmatched || []).slice(0, 10);
       console.log(`[grade] auto-settle: ${r.settled} games, ${r.graded} picks graded` + (r.unmatchedCount ? `, ${r.unmatchedCount} unmatched` : ""));
     }
   } catch (e) { console.warn("[grade] auto-settle failed:", e.message); }
+  const report = { autoSettled: 0, autoGraded: 0, unmatched: 0 };
   await settleManualFromScores();          // manual games settle themselves by score
   await syncFixtures(); // refresh statuses
   for (const f of q.finishedUngraded.all()) {
@@ -300,6 +303,7 @@ export async function gradeFinished() {
     }
     console.log(`[grade:${f.sport}] settled ${f.comp}`);
   }
+  return report;
 }
 
 // —— STAT-BASED SETTLEMENT ————————————————————————————————

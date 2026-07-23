@@ -131,6 +131,7 @@ app.get("/api/value", (req, res) => {
     seen.add(r.id);
     const row = { id: r.id, sport: r.sport, comp: r.comp, home: r.home, away: r.away, kickoff: r.kickoff,
                market: r.market, pick: r.pick, edge: r.edge, probability: r.probability, price: r.price,
+               dateAssumed: !!r.date_assumed,
                closing: r.closing_price ?? null,
                clv: (r.price > 1 && r.closing_price > 1) ? Math.round((r.price / r.closing_price - 1) * 1000) / 10 : null,
                reasoning: r.reasoning || null };
@@ -157,6 +158,7 @@ app.get("/api/fixtures", (req, res) => {
   const base = req.query.sport ? q.fixturesBySport.all({ sport: req.query.sport }) : q.fixturesAll.all();
   const clean = base.filter((f) => !feedReject(f));
   const fixtures = clean.map((f) => ({
+    dateAssumed: !!f.date_assumed,
     ...f,
     entrants: f.entrants ? JSON.parse(f.entrants) : null,
     odds: q.oddsFor.all(f.id),
@@ -299,7 +301,7 @@ app.get(["/api/live", "/api/games"], (req, res) => {
 // features that call routes it doesn't have would 404 with no explanation —
 // instead the UI reads these flags and says exactly what's missing.
 const BUILD = "2026-07-19b";   // bump on every deploy so /api/version proves which code is live
-const CAPABILITIES = ["mission-auto", "auto-settle", "purge-junk", "reset", "showdown-bulk", "feed-hygiene", "value-board", "undated-uploads", "schema-migrations", "dedupe", "reclassify", "results-vision", "status-sweep", "reprice", "live-alias", "settle-stats"];
+const CAPABILITIES = ["mission-auto", "auto-settle", "purge-junk", "reset", "showdown-bulk", "feed-hygiene", "value-board", "undated-uploads", "schema-migrations", "dedupe", "reclassify", "results-vision", "undo-date-move", "status-sweep", "reprice", "live-alias", "settle-stats"];
 app.get("/api/version", (_, res) => res.json({ build: BUILD, capabilities: CAPABILITIES, resetOnBoot: process.env.RESET_ON_BOOT || null, freeForAll: FREE_FOR_ALL }));
 
 // External-cron endpoint: wakes the server and runs the full cycle.
@@ -468,6 +470,78 @@ function parseBulkBets(body) {
   });
 }
 
+// —— SHOWDOWN LEAGUE RULES ————————————————————————————————
+// Structure chosen to make the arena MEASURE something instead of being a coin
+// flip: identical slate (same information), a fixed daily budget (no bankroll
+// advantage), and a per-bet cap (nobody dies on one upset — which is exactly
+// what ended the first season).
+const SD = {
+  START: Number(process.env.SD_START_BANKROLL) || 1000,
+  DAILY: Number(process.env.SD_DAILY_BUDGET) || 100,   // must be deployed each day
+  MAX_BET: Number(process.env.SD_MAX_BET) || 50,       // cap on any single bet
+  MIN_BETS: Number(process.env.SD_MIN_BETS) || 1,
+  MAX_BETS: Number(process.env.SD_MAX_BETS) || 5,
+};
+const sdToday = () => new Date().toISOString().slice(0, 10);
+
+// Build today's slate from real fixtures: the most complete football games
+// with odds. Auto-suggested so curating it never becomes a daily chore.
+app.post("/api/showdown/slate/auto", requireAdmin, (req, res) => {
+  const day = String(req.body?.day || sdToday());
+  const n = Math.min(12, Math.max(2, Number(req.body?.count) || 8));
+  const sport = String(req.body?.sport || "soccer");
+  const rows = db.prepare(`
+    SELECT f.id, f.home, f.away, f.kickoff, COUNT(o.rowid) noffers
+      FROM fixtures f JOIN odds o ON o.fixture_id = f.id
+     WHERE f.sport = @sport AND f.status != 'final'
+       AND COALESCE(f.date_assumed,0) = 0
+       AND datetime(replace(f.kickoff,' ','T')) > datetime('now')
+     GROUP BY f.id HAVING noffers >= 2
+     ORDER BY noffers DESC, f.kickoff ASC LIMIT @n`).all({ sport, n });
+  q.sdSlateClear.run({ day });
+  for (const f of rows) q.sdSlateAdd.run({ day, fixture_id: f.id, event: `${f.home} v ${f.away}`, kickoff: f.kickoff });
+  res.json({ ok: true, day, slate: q.sdSlateFor.all({ day }) });
+});
+
+// Weekly season reset — a busted model is back next Monday instead of sitting
+// dead on the board for the rest of time.
+app.post("/api/showdown/season/reset", requireAdmin, (_, res) => {
+  db.prepare("UPDATE showdown_models SET current_bankroll=?, starting_bankroll=?").run(SD.START, SD.START);
+  db.prepare("DELETE FROM showdown_bets WHERE result='pending'").run();
+  console.log(`[showdown] season reset — all models to €${SD.START}`);
+  res.json({ ok: true, bankroll: SD.START });
+});
+
+app.get("/api/showdown/slate", (req, res) => {
+  const day = String(req.query?.day || sdToday());
+  const slate = q.sdSlateFor.all({ day });
+  const budgets = q.sdModels.all().map((m) => {
+    const t = q.sdSpentToday.get({ mid: m.id, day });
+    return { name: m.name, bankroll: m.current_bankroll, spentToday: t.spent, betsToday: t.n,
+             remaining: Math.round((SD.DAILY - t.spent) * 100) / 100 };
+  });
+  res.json({ day, rules: SD, slate, budgets });
+});
+
+// Validate one prospective bet against the league rules.
+function checkSdRules(model, bet, day) {
+  const spent = q.sdSpentToday.get({ mid: model.id, day });
+  const stake = Number(bet.stake);
+  if (stake > SD.MAX_BET) return `stake €${stake} exceeds the €${SD.MAX_BET} single-bet cap`;
+  if (spent.n >= SD.MAX_BETS) return `${model.name} already has ${spent.n} bets today (max ${SD.MAX_BETS})`;
+  if (spent.spent + stake > SD.DAILY) return `€${stake} would put ${model.name} at €${spent.spent + stake} today (daily budget €${SD.DAILY}, €${Math.round((SD.DAILY - spent.spent) * 100) / 100} left)`;
+  const slate = q.sdSlateFor.all({ day });
+  if (slate.length) {
+    const want = String(bet.event || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
+    const ok = slate.some((sl) => {
+      const s2 = String(sl.event || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
+      return s2.includes(want) || want.includes(s2);
+    });
+    if (!ok) return `"${bet.event}" is not on today's slate`;
+  }
+  return null;
+}
+
 app.post("/api/showdown/bulk", requireAdmin, (req, res) => {
   let rows;
   try { rows = parseBulkBets(req.body || {}); }
@@ -477,6 +551,7 @@ app.post("/api/showdown/bulk", requireAdmin, (req, res) => {
   let round = req.body?.round_id;
   if (!round) { const rs = q.sdRounds.all(); round = rs.length ? rs[0].id : (q.sdNewRound.run({ label: "Round " + new Date().toISOString().slice(0, 10) }), q.sdRounds.all()[0].id); }
 
+  const day2 = String(req.body?.day || sdToday());
   const added = [], rejected = [];
   const spent = {};                                   // running exposure inside this paste
   for (const r of rows) {
@@ -493,8 +568,11 @@ app.post("/api/showdown/bulk", requireAdmin, (req, res) => {
     const used = spent[m.id] || 0;
     const free = Math.round((freeBankroll(m) - used) * 100) / 100;
     if (stake > free) { fail(`${m.name} only has €${free} unstaked left`); continue; }
+    // league rules: single-bet cap, daily budget, bet count, slate membership
+    const ruleErr = checkSdRules(m, { ...r, stake }, day2);
+    if (ruleErr) { fail(ruleErr); continue; }
     q.sdAddBet.run({ model_id: m.id, round_id: round, event: String(r.event).trim(), market: String(r.market).trim(),
-      pick: String(r.pick).trim(), odds, stake, reasoning: r.reasoning || null });
+      pick: String(r.pick).trim(), odds, stake, reasoning: r.reasoning || null, day: day2 });
     spent[m.id] = used + stake;
     added.push({ model: m.name, event: r.event, market: r.market, pick: r.pick, odds, stake });
   }
@@ -681,18 +759,42 @@ app.post("/api/purge-junk", requireAdmin, (_, res) => {
 
 // One-click rescue: any manual game whose (guessed) kickoff slipped into the past but was never
 // settled gets bumped to the next evening slot → back on the Live Feed, out of the settle queue.
+// Bulk date-move, now REVERSIBLE. This button has cost real settle work twice;
+// a confirmation dialog is not enough protection for a bulk mutation, so every
+// run snapshots the previous kickoff/status and can be rolled back verbatim.
+let LAST_DATE_MOVE = null;
+
 app.post("/api/fix-dates", requireAdmin, (_, res) => {
   const now = new Date();
   let slot = new Date(now.toISOString().slice(0, 10) + "T20:00:00");
   if (slot.getTime() < now.getTime() + 30 * 60e3) slot = new Date(slot.getTime() + 24 * 3600e3);
   const k = slot.toISOString().slice(0, 10) + " 20:00";
-  const r = db.prepare(`
-    UPDATE fixtures SET kickoff=@k, status='upcoming'
+
+  const affected = db.prepare(`
+    SELECT id, kickoff, status, date_assumed FROM fixtures
     WHERE id LIKE 'manual:%' AND status IN ('upcoming','live','awaiting_result') AND kickoff IS NOT NULL
-      AND datetime(replace(kickoff,' ','T')) < datetime('now')
-  `).run({ k });
-  console.log(`[fix-dates] moved ${r.changes} games to ${k}`);
-  res.json({ ok: true, moved: r.changes, kickoff: k });
+      AND datetime(replace(kickoff,' ','T')) < datetime('now')`).all();
+
+  const upd = db.prepare("UPDATE fixtures SET kickoff=?, status='upcoming', date_assumed=1 WHERE id=?");
+  db.transaction(() => { for (const f of affected) upd.run(k, f.id); })();
+
+  LAST_DATE_MOVE = { at: Date.now(), kickoff: k, rows: affected };
+  console.log(`[fix-dates] moved ${affected.length} games to ${k} (undo available)`);
+  res.json({ ok: true, moved: affected.length, kickoff: k, undoable: affected.length > 0,
+             games: affected.slice(0, 8).map((f) => f.id.replace(/^manual:[a-z0-9_]+:/, "").replace(/_v_/, " v ")) });
+});
+
+// Put every moved game back exactly where it was.
+app.post("/api/fix-dates/undo", requireAdmin, (_, res) => {
+  if (!LAST_DATE_MOVE || !LAST_DATE_MOVE.rows.length) return res.status(400).json({ error: "nothing to undo" });
+  const upd = db.prepare("UPDATE fixtures SET kickoff=?, status=?, date_assumed=? WHERE id=?");
+  db.transaction(() => {
+    for (const f of LAST_DATE_MOVE.rows) upd.run(f.kickoff, f.status, f.date_assumed || 0, f.id);
+  })();
+  const n = LAST_DATE_MOVE.rows.length;
+  console.log(`[fix-dates] undo: ${n} games restored`);
+  LAST_DATE_MOVE = null;
+  res.json({ ok: true, restored: n });
 });
 
 // —— AUTO-SETTLE ————————————————————————————————————————
@@ -798,7 +900,23 @@ app.post("/api/jobs/grade", async (_, res) => { await gradeFinished(); res.json(
 
 // —— schedule ————————————————————————————————————
 cron.schedule("30 */6 * * *", () => generatePicks().catch(console.error)); // picks after each sync
-cron.schedule("*/30 * * * *", () => gradeFinished().catch(console.error)); // grade every 30 min
+// Autonomous settlement loop. gradeFinished() already runs the results feed,
+// the manual-score settler and the status sweep; running it every 15 minutes
+// means a finished game is normally graded before you would have opened the tab.
+cron.schedule("*/15 * * * *", async () => {
+  try {
+    const r = await gradeFinished();
+    LAST_AUTO = { at: Date.now(), ...(r || {}) };
+  } catch (e) { console.error("[cron:grade]", e.message); LAST_AUTO = { at: Date.now(), error: e.message }; }
+});
+let LAST_AUTO = null;
+// what the robot did last, so the admin panel can show it rather than leaving
+// you to guess whether anything is running
+app.get("/api/settle/last", requireAdmin, async (_, res) => {
+  const { resultsFeedStatus } = await import("./results.js");
+  const pending = q.unsettledPast.all().length;
+  res.json({ last: LAST_AUTO, feed: resultsFeedStatus(), pendingManual: pending });
+});
 
 const port = process.env.PORT || 3001;
 // FRESH START ON DEPLOY

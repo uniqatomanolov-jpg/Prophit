@@ -906,7 +906,7 @@ export function ingestEvents(csvText) {
         const ent = entrantsMap[id] ? JSON.stringify([...entrantsMap[id]]) : null;
         upsertFixture.run({ id, sport: sp, comp: r.competition || "Manual",
           home: r.home, away: r.away || "", entrants: ent, kickoff: r.kickoff || null, status: "upcoming",
-          score: null, raw: JSON.stringify({ source: "manual" }) });
+          score: null, raw: JSON.stringify({ source: "manual" }), date_assumed: r.dateAssumed ? 1 : 0 });
         seen.add(id); fixtures++;
       }
       let option = r.line && !String(r.option).includes(String(r.line)) ? `${r.option} ${r.line}`.trim() : r.option;
