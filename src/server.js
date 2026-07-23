@@ -238,6 +238,10 @@ app.get("/api/stripe/session", async (req, res) => {
 // Sits out entirely when nothing clears the bar — no forced daily bet.
 const MISSION_MIN_EDGE = Number(process.env.MISSION_MIN_EDGE) || 4;    // %
 const MISSION_MAX_ODDS = Number(process.env.MISSION_MAX_ODDS) || 3.5;  // survival: no longshots
+// A floor matters as much as a ceiling. Compounding to €1,000,000 from €100 is
+// a 10,000x climb: at 1.20 odds that is ~50 straight wins, at 2.00 odds ~14.
+// Below this the run cannot realistically finish, so the mission ignores them.
+const MISSION_MIN_ODDS = Number(process.env.MISSION_MIN_ODDS) || 1.7;
 // The mission picker, callable from the route AND the cron — this is the
 // autonomy: ValueBot chooses its own game and sizes its own stake by Kelly.
 function autoMissionPick() {
@@ -259,7 +263,7 @@ function autoMissionPick() {
       const o = odds.find((x) => x.market === p.market &&
         String(x.option).toLowerCase() === String(p.pick).toLowerCase());
       const price = o ? o.price : p.price;
-      if (!price || price > MISSION_MAX_ODDS) continue;          // no longshots
+      if (!price || price > MISSION_MAX_ODDS || price < MISSION_MIN_ODDS) continue;   // no longshots, no grinders
       // rank: highest edge, tie-break on shorter (safer) price
       if (!best || p.edge > best.edge || (p.edge === best.edge && price < best.price))
         best = { fixture_id: f.id, market: p.market, option: p.pick, odds: price,
@@ -267,7 +271,7 @@ function autoMissionPick() {
     }
   }
   if (!best) return { ...runView(run), none: true,
-    reason: `no edge \u2265 ${MISSION_MIN_EDGE}% at odds \u2264 ${MISSION_MAX_ODDS} today \u2014 sitting out` };
+    reason: `no edge \u2265 ${MISSION_MIN_EDGE}% at odds ${MISSION_MIN_ODDS}\u2013${MISSION_MAX_ODDS} today \u2014 sitting out` };
 
   // Kelly from ValueBot's own probability — and if Kelly says zero, it SITS OUT.
   // No token fallback stake on a bet its own math rejects.
@@ -613,7 +617,7 @@ function kellyStake(bankroll, odds, fairOdds) {
   f = Math.max(0, Math.min(0.25, f));                        // never risk >25% on one bet
   return Math.round(bankroll * f * 100) / 100;
 }
-const MILESTONES = [100, 1000, 10000, 100000, 1000000];
+const MILESTONES = [100, 250, 1000, 5000, 25000, 100000, 400000, 1000000];
 function runView(run) {
   if (!run) return null;
   const bets = q.cmpBets.all({ run: run.id });
