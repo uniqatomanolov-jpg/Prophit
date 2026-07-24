@@ -773,7 +773,7 @@ export function canonOption(market, option, home, away) {
   return option;
 }
 
-export function ingestEvents(csvText) {
+export function ingestEvents(csvText, opts) {
   const raw = splitRows(csvText);
   let rows = normWebScraperMarkets(raw) || normWebScraperBasket(raw) || normWebScraperPlayers(raw) || normWebScraper(raw) || normBG(raw) || normSpreadexList(raw) || normSpreadex(raw) || normBetanoMatch(raw) || normSimplePlayers(raw) || normEN(raw);
   // scraped soccer files: keep only the big-turnover markets (rest is noise)
@@ -800,6 +800,11 @@ export function ingestEvents(csvText) {
     //    No more "Invalid Date" cards and no more games that can never expire.
     rows = rows.filter((r) => {
       const ko = normalizeKickoff(r.kickoff);
+      if (!ko && opts && opts.day) {
+        // uploader told us the date — use it instead of inventing one
+        r.kickoff = `${String(opts.day).slice(0,10)} 20:00`;
+        return true;
+      }
       if (!ko) {
         // No readable date. A bookmaker screenshot often shows only players and
         // prices — dropping those would throw the whole upload away, which is

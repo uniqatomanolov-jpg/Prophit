@@ -891,11 +891,11 @@ app.post("/api/settle", requireAdmin, (req, res) => {
 
 app.post("/api/upload-screenshot", requireAdmin, async (req, res) => {
   try {
-    let { image, mediaType } = req.body || {};
+    let { image, mediaType, day } = req.body || {};
     if (!image) return res.status(400).json({ error: "no image" });
     const m = String(image).match(/^data:(image\/\w+);base64,(.*)$/);
     if (m) { mediaType = m[1]; image = m[2]; }
-    const out = await parseScreenshot(image, mediaType || "image/png");
+    const out = await parseScreenshot(image, mediaType || "image/png", { day: day || null });
     res.json(out);
     if (out.fixtures > 0) { console.log("[screenshot] auto-predicting…"); predictSoon(); }
   } catch (e) { console.error("[screenshot]", e.message); res.status(400).json({ error: e.message }); }

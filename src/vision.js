@@ -60,9 +60,10 @@ function canonMedia(m){
   return MEDIA_OK.has(v)?v:"image/png";
 }
 
-async function callVision(model,base64,mediaType){
+async function callVision(model,base64,mediaType,hint){
+  hint=hint||"extract";
   const key=process.env.ANTHROPIC_API_KEY;
-  const res=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"content-type":"application/json","x-api-key":key,"anthropic-version":"2023-06-01"},body:JSON.stringify({model,max_tokens:8000,system:SYSTEM_PROMPT,messages:[{role:"user",content:[{type:"image",source:{type:"base64",media_type:mediaType,data:base64}},{type:"text",text:"extract"}]}]})});
+  const res=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"content-type":"application/json","x-api-key":key,"anthropic-version":"2023-06-01"},body:JSON.stringify({model,max_tokens:8000,system:SYSTEM_PROMPT,messages:[{role:"user",content:[{type:"image",source:{type:"base64",media_type:mediaType,data:base64}},{type:"text",text:hint}]}]})});
   if(res.ok)return res.json();
   // surface WHY — a bare "vision API 400" is unactionable
   let detail="";
@@ -73,19 +74,23 @@ async function callVision(model,base64,mediaType){
   throw err;
 }
 
-export async function parseScreenshot(base64,mediaType){
+export async function parseScreenshot(base64,mediaType,opts){
   const key=process.env.ANTHROPIC_API_KEY; if(!key)throw new Error("ANTHROPIC_API_KEY not set");
   const media=canonMedia(mediaType);
+  // A date supplied by the uploader beats anything inferred. Passed into the
+  // prompt so rows without a visible date are dated correctly instead of guessed.
+  const forDay=(opts&&opts.day)?String(opts.day).slice(0,10):null;
   // base64 inflates by ~4/3; the API caps an image at 5MB decoded
   const bytes=Math.floor(String(base64).length*0.75);
   if(bytes>5*1024*1024)throw new Error(`screenshot is ${(bytes/1048576).toFixed(1)}MB — the vision API caps images at 5MB. Crop it, or screenshot a smaller region.`);
   let data;
-  try{ data=await callVision(VISION_MODEL,base64,media); }
+  try{ const hint=forDay?("extract. Every game in this image is on "+forDay+" \u2014 use that date for any row without its own visible date."):"extract";
+    data=await callVision(VISION_MODEL,base64,media,hint); }
   catch(e){
     // a wrong/retired model id is the most common 400 — fall back once, loudly
     if(e.status===400&&/model/i.test(e.detail||"")&&VISION_MODEL!==FALLBACK_MODEL){
       console.warn(`[vision] ${VISION_MODEL} rejected (${e.detail}) — retrying with ${FALLBACK_MODEL}`);
-      data=await callVision(FALLBACK_MODEL,base64,media);
+      data=await callVision(FALLBACK_MODEL,base64,media,forDay?("extract. All games are on "+forDay+"."):"extract");
     } else throw e;
   }
   const text=(data.content||[]).filter((b)=>b.type==="text").map((b)=>b.text).join("");
@@ -98,7 +103,7 @@ export async function parseScreenshot(base64,mediaType){
       : `Claude did not return usable JSON (${String(text).slice(0,120)||"empty reply"})`);
   }
   if(!Array.isArray(items))items=[items];
-  return { parsed:items, ...ingestEvents(toCsvRows(items)) };
+  return { parsed:items, ...ingestEvents(toCsvRows(items), { day: forDay }) };
 }
 
 // ————————————————————————————————————————————————————————————————
