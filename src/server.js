@@ -437,43 +437,6 @@ function exposureOf(modelId) {
 }
 function freeBankroll(m) { return Math.round((m.current_bankroll - exposureOf(m.id)) * 100) / 100; }
 
-app.post("/api/showdown/bet", requireAdmin, (req, res) => {
-  const { model, event, market, pick, odds, stake, reasoning, round_id } = req.body || {};
-  const m = q.sdModelByName.get({ name: model });
-  if (!m) return res.status(400).json({ error: "unknown model: " + model });
-  if (!event || !market || !pick || !odds || !stake) return res.status(400).json({ error: "need event, market, pick, odds, stake" });
-  const free = freeBankroll(m);
-  if (Number(stake) > free) return res.status(400).json({ error: `${model} has €${free} unstaked (bankroll €${m.current_bankroll}, €${exposureOf(m.id)} already live)` });
-  let round = round_id;
-  if (!round) { const rs = q.sdRounds.all(); round = rs.length ? rs[0].id : (q.sdNewRound.run({ label: "Round 1" }), q.sdRounds.all()[0].id); }
-  q.sdAddBet.run({ model_id: m.id, round_id: round, event, market, pick, odds: Number(odds), stake: Number(stake), reasoning: reasoning || null });
-  res.json(showdownView());
-});
-
-// Bulk-log a whole round in one paste. Accepts either
-//   { bets: [ {model,event,market,pick,odds,stake,reasoning}, ... ] }
-//   { text: "Claude | Spain v Argentina | x12 | draw | 3.40 | 20 | reasoning…" }   (one per line)
-//   { text: "model,event,market,pick,odds,stake,reasoning\n..." }                   (CSV with header)
-// Every row is validated independently: good rows are logged, bad rows come back
-// with the reason, so one typo never silently drops a model's whole round.
-function parseBulkBets(body) {
-  if (Array.isArray(body?.bets)) return body.bets.map((b, i) => ({ ...b, _line: i + 1 }));
-  const text = String(body?.text || "").trim();
-  if (!text) return [];
-  const lines = text.split(/\r?\n/).filter((l) => l.trim());
-  const first = lines[0].toLowerCase();
-  if (/\bmodel\b/.test(first) && /\bpick\b/.test(first)) {
-    const rows = parseCSV(text);
-    return rows.map((r, i) => ({ model: r.model, event: r.event, market: r.market, pick: r.pick,
-      odds: r.odds, stake: r.stake, reasoning: r.reasoning || r.why || "", _line: i + 2 }));
-  }
-  return lines.map((l, i) => {
-    const parts = l.includes("|") ? l.split("|") : l.split(/\t/);
-    const [model, event, market, pick, odds, stake, ...rest] = parts.map((x) => String(x).trim());
-    return { model, event, market, pick, odds, stake, reasoning: rest.join(" | ").trim(), _line: i + 1 };
-  });
-}
-
 // —— SHOWDOWN LEAGUE RULES ————————————————————————————————
 // Structure chosen to make the arena MEASURE something instead of being a coin
 // flip: identical slate (same information), a fixed daily budget (no bankroll
@@ -536,14 +499,68 @@ function checkSdRules(model, bet, day) {
   if (spent.spent + stake > SD.DAILY) return `€${stake} would put ${model.name} at €${spent.spent + stake} today (daily budget €${SD.DAILY}, €${Math.round((SD.DAILY - spent.spent) * 100) / 100} left)`;
   const slate = q.sdSlateFor.all({ day });
   if (slate.length) {
-    const want = String(bet.event || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
+    // Compare on TEAM NAMES, not the whole string: "UTA Arad vs Otelul Gala\u021bi"
+    // and "UTA Arad v Otelul Galati" are the same fixture, but differ by the
+    // separator ("vs" / "v" / "-") and by diacritics. Both must be neutralised.
+    const norm = (x) => String(x || "")
+      .normalize("NFD").replace(/[\u0300-\u036f]/g, "")   // Gala\u021bi -> Galati
+      .toLowerCase().replace(/[^a-z0-9 ]+/g, " ")
+      .replace(/\s+(vs?|v|@|-)\s+/g, " | ")               // any separator -> |
+      .replace(/\s+/g, " ").trim();
+    const parts = (x) => norm(x).split("|").map((t) => t.replace(/[^a-z0-9]/g, "")).filter(Boolean);
+    const want = parts(bet.event);
     const ok = slate.some((sl) => {
-      const s2 = String(sl.event || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
-      return s2.includes(want) || want.includes(s2);
+      const have = parts(sl.event);
+      if (!want.length || !have.length) return false;
+      // both teams must appear (either order), allowing one to be a prefix of the other
+      return want.every((w) => have.some((h) => h.includes(w) || w.includes(h)));
     });
-    if (!ok) return `"${bet.event}" is not on today's slate`;
+    if (!ok) return `"${bet.event}" is not on today's slate (${slate.length} games listed)`;
   }
   return null;
+}
+
+app.post("/api/showdown/bet", requireAdmin, (req, res) => {
+  const { model, event, market, pick, odds, stake, reasoning, round_id } = req.body || {};
+  const m = q.sdModelByName.get({ name: model });
+  if (!m) return res.status(400).json({ error: "unknown model: " + model });
+  if (!event || !market || !pick || !odds || !stake) return res.status(400).json({ error: "need event, market, pick, odds, stake" });
+  const free = freeBankroll(m);
+  if (Number(stake) > free) return res.status(400).json({ error: `${model} has €${free} unstaked (bankroll €${m.current_bankroll}, €${exposureOf(m.id)} already live)` });
+  let round = round_id;
+  if (!round) { const rs = q.sdRounds.all(); round = rs.length ? rs[0].id : (q.sdNewRound.run({ label: "Round 1" }), q.sdRounds.all()[0].id); }
+  const day = String(req.body?.day || sdToday());
+  // the form must obey the same league rules as the bulk paste — otherwise the
+  // €50 cap and the daily budget are enforced in one path and not the other
+  const ruleErr = checkSdRules(m, { event, stake: Number(stake) }, day);
+  if (ruleErr) return res.status(400).json({ error: ruleErr });
+  q.sdAddBet.run({ model_id: m.id, round_id: round, event, market, pick,
+    odds: Number(odds), stake: Number(stake), reasoning: reasoning || null, day });
+  res.json(showdownView());
+});
+
+// Bulk-log a whole round in one paste. Accepts either
+//   { bets: [ {model,event,market,pick,odds,stake,reasoning}, ... ] }
+//   { text: "Claude | Spain v Argentina | x12 | draw | 3.40 | 20 | reasoning…" }   (one per line)
+//   { text: "model,event,market,pick,odds,stake,reasoning\n..." }                   (CSV with header)
+// Every row is validated independently: good rows are logged, bad rows come back
+// with the reason, so one typo never silently drops a model's whole round.
+function parseBulkBets(body) {
+  if (Array.isArray(body?.bets)) return body.bets.map((b, i) => ({ ...b, _line: i + 1 }));
+  const text = String(body?.text || "").trim();
+  if (!text) return [];
+  const lines = text.split(/\r?\n/).filter((l) => l.trim());
+  const first = lines[0].toLowerCase();
+  if (/\bmodel\b/.test(first) && /\bpick\b/.test(first)) {
+    const rows = parseCSV(text);
+    return rows.map((r, i) => ({ model: r.model, event: r.event, market: r.market, pick: r.pick,
+      odds: r.odds, stake: r.stake, reasoning: r.reasoning || r.why || "", _line: i + 2 }));
+  }
+  return lines.map((l, i) => {
+    const parts = l.includes("|") ? l.split("|") : l.split(/\t/);
+    const [model, event, market, pick, odds, stake, ...rest] = parts.map((x) => String(x).trim());
+    return { model, event, market, pick, odds, stake, reasoning: rest.join(" | ").trim(), _line: i + 1 };
+  });
 }
 
 app.post("/api/showdown/bulk", requireAdmin, (req, res) => {
@@ -920,6 +937,21 @@ app.get("/api/settle/last", requireAdmin, async (_, res) => {
   const { resultsFeedStatus } = await import("./results.js");
   const pending = q.unsettledPast.all().length;
   res.json({ last: LAST_AUTO, feed: resultsFeedStatus(), pendingManual: pending });
+});
+
+// —— API ERROR CONTRACT ————————————————————————————————————
+// Anything under /api must answer with JSON, always. Express's default handler
+// returns an HTML error page, which the frontend can only report as "Server
+// returned HTML, not JSON" — technically true, useless for diagnosis. These two
+// handlers turn any unmatched route or thrown error into a readable JSON error.
+app.use("/api", (req, res) => {
+  res.status(404).json({ error: `no such endpoint: ${req.method} ${req.path}` });
+});
+app.use((err, req, res, _next) => {
+  const msg = err && err.message ? err.message : String(err);
+  console.error(`[api:500] ${req.method} ${req.originalUrl} \u2014 ${msg}`);
+  if (String(req.path).startsWith("/api")) return res.status(500).json({ error: msg });
+  res.status(500).send("Internal error");
 });
 
 const port = process.env.PORT || 3001;
