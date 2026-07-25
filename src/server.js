@@ -12,7 +12,7 @@ function predictSoon() {
   predictBusy = true;
   generatePicks().catch((e) => console.error("[auto-predict]", e.message)).finally(() => { predictBusy = false; });
 }
-import { ingestEvents, ingestResults, isBadName, parseCSV, mergeDuplicateFixtures, canonSport, reclassifyFixtures } from "./uploads.js";
+import { ingestEvents, ingestResults, isBadName, parseCSV, mergeDuplicateFixtures, canonSport, reclassifyFixtures, previewReclassify } from "./uploads.js";
 
 const app = express();
 // Stripe webhook needs the raw body for signature verification — mount BEFORE json parser.
@@ -110,6 +110,13 @@ function feedReject(f) {
   if (f.away && isBadName(f.away)) return "no-name";
   const ko = koMs(f.kickoff);
   if (ko == null) return "no-date";                                  // unschedulable → never show
+  // A GUESSED kickoff ("tonight 20:00" because no date was visible on the
+  // source screenshot) is not real information. It survives the staleness
+  // check below for up to STALE_HOURS after the fake time even when the actual
+  // game finished yesterday — this was the main source of "outdated games"
+  // reports on the Live Feed. /api/value already excluded these; /api/fixtures
+  // (Live Feed, Headliners, match cards) did not, until now.
+  if (f.status !== "final" && f.date_assumed) return "date-assumed";
   if (f.status !== "final" && ko < Date.now() - STALE_HOURS * 3600e3) return "stale";
   return null;
 }
@@ -462,21 +469,62 @@ app.post("/api/showdown/slate/auto", requireAdmin, (req, res) => {
       FROM fixtures f JOIN odds o ON o.fixture_id = f.id
      WHERE f.sport = @sport AND f.status != 'final'
        AND COALESCE(f.date_assumed,0) = 0
+       -- "Today's slate" must mean TODAY. Without an upper bound this pulled in
+       -- next week's fixtures and the arena looked wrong on day one.
+       AND date(replace(f.kickoff,' ','T')) = @day
        AND datetime(replace(f.kickoff,' ','T')) > datetime('now')
      GROUP BY f.id HAVING noffers >= 2
-     ORDER BY noffers DESC, f.kickoff ASC LIMIT @n`).all({ sport, n });
+     ORDER BY noffers DESC, f.kickoff ASC LIMIT @n`).all({ sport, n, day });
   q.sdSlateClear.run({ day });
   for (const f of rows) q.sdSlateAdd.run({ day, fixture_id: f.id, event: `${f.home} v ${f.away}`, kickoff: f.kickoff });
-  res.json({ ok: true, day, slate: q.sdSlateFor.all({ day }) });
+  const built = q.sdSlateFor.all({ day });
+  res.json({ ok: true, day, slate: built,
+    note: built.length ? null : `no ${sport} fixtures with odds kick off on ${day} — upload today's card first, or set the date on the screenshot upload` });
 });
 
 // Weekly season reset — a busted model is back next Monday instead of sitting
 // dead on the board for the rest of time.
-app.post("/api/showdown/season/reset", requireAdmin, (_, res) => {
+app.post("/api/showdown/season/reset", requireAdmin, (req, res) => {
+  const keep = req.body?.keepHistory === true;
   db.prepare("UPDATE showdown_models SET current_bankroll=?, starting_bankroll=?").run(SD.START, SD.START);
-  db.prepare("DELETE FROM showdown_bets WHERE result='pending'").run();
-  console.log(`[showdown] season reset — all models to €${SD.START}`);
-  res.json({ ok: true, bankroll: SD.START });
+  // Default is a CLEAN SLATE: bankrolls reset and every past call removed, so the
+  // board is not half old-format results (one €100 all-in) and half new league.
+  const del = keep
+    ? db.prepare("DELETE FROM showdown_bets WHERE result='pending'").run()
+    : db.prepare("DELETE FROM showdown_bets").run();
+  if (!keep) db.prepare("DELETE FROM showdown_slate").run();
+  console.log(`[showdown] season reset — all models to €${SD.START}, ${del.changes} bets cleared`);
+  res.json({ ok: true, bankroll: SD.START, cleared: del.changes, keptHistory: keep });
+});
+
+// Manual slate control. The auto-builder is a convenience, not a constraint —
+// the admin decides which games the arena plays. Add anything, including a
+// fixture that is not in the feed at all.
+app.post("/api/showdown/slate/add", requireAdmin, (req, res) => {
+  const day = String(req.body?.day || sdToday());
+  const raw = String(req.body?.event || "").trim();
+  if (!raw) return res.status(400).json({ error: "need an event name" });
+  // try to bind it to a real fixture so kick-off time and settlement can follow
+  const norm = (x) => String(x || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase().replace(/[^a-z0-9]+/g, "");
+  const want = norm(raw);
+  const match = db.prepare("SELECT id, home, away, kickoff FROM fixtures WHERE status!='final'").all()
+    .find((f) => { const k = norm(`${f.home}${f.away}`); return k.includes(want) || want.includes(k); });
+  q.sdSlateAdd.run({
+    day,
+    fixture_id: match ? match.id : `manual-slate:${want.slice(0, 60)}`,
+    event: match ? `${match.home} v ${match.away}` : raw,
+    kickoff: match ? match.kickoff : null,
+  });
+  res.json({ ok: true, day, added: match ? `${match.home} v ${match.away}` : raw,
+             linkedToFixture: !!match, slate: q.sdSlateFor.all({ day }) });
+});
+
+app.post("/api/showdown/slate/remove", requireAdmin, (req, res) => {
+  const day = String(req.body?.day || sdToday());
+  const id = String(req.body?.fixture_id || "");
+  db.prepare("DELETE FROM showdown_slate WHERE day=? AND fixture_id=?").run(day, id);
+  res.json({ ok: true, slate: q.sdSlateFor.all({ day }) });
 });
 
 app.get("/api/showdown/slate", (req, res) => {
@@ -515,7 +563,7 @@ function checkSdRules(model, bet, day) {
       // both teams must appear (either order), allowing one to be a prefix of the other
       return want.every((w) => have.some((h) => h.includes(w) || w.includes(h)));
     });
-    if (!ok) return `"${bet.event}" is not on today's slate (${slate.length} games listed)`;
+    if (!ok) return `"${bet.event}" is not on today's slate — add it to the slate first (${slate.length} games listed)`;
   }
   return null;
 }
@@ -615,10 +663,13 @@ app.post("/api/showdown/settle", requireAdmin, (req, res) => {
   res.json(showdownView());
 });
 
+// Legacy route kept as an alias — it now does the SAME thing as
+// /api/showdown/season/reset instead of a second, contradictory reset path
+// that hardcoded €100 while leaving starting_bankroll at the season default.
 app.post("/api/showdown/reset", requireAdmin, (_, res) => {
   db.prepare("DELETE FROM showdown_bets").run();
-  db.prepare("DELETE FROM showdown_rounds").run();
-  q.sdResetAll.run();
+  db.prepare("DELETE FROM showdown_slate").run();
+  q.sdResetAll.run({ bankroll: SD.START });
   res.json(showdownView());
 });
 
@@ -749,9 +800,11 @@ app.post("/api/settle-from-plan", requireAdmin, async (req, res) => {
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
 
-app.post("/api/reclassify", requireAdmin, (_, res) => {
-  try { res.json({ ok: true, ...reclassifyFixtures(), reprice: repriceIncompletePicks() }); }
-  catch (e) { console.error("[reclassify]", e.message); res.status(400).json({ error: e.message }); }
+app.post("/api/reclassify", requireAdmin, (req, res) => {
+  try {
+    if (req.body?.dryRun === true) return res.json({ ok: true, dryRun: true, ...previewReclassify() });
+    res.json({ ok: true, ...reclassifyFixtures(), reprice: repriceIncompletePicks() });
+  } catch (e) { console.error("[reclassify]", e.message); res.status(400).json({ error: e.message }); }
 });
 
 app.post("/api/dedupe", requireAdmin, (_, res) => {
@@ -761,13 +814,21 @@ app.post("/api/dedupe", requireAdmin, (_, res) => {
 
 // Admin: purge parse-junk already in the DB — fixtures whose "names" are prices,
 // market labels or league headers, plus anything with an unusable kickoff.
-app.post("/api/purge-junk", requireAdmin, (_, res) => {
+app.post("/api/purge-junk", requireAdmin, (req, res) => {
+  const dryRun = req.body?.dryRun === true;
   const all = db.prepare("SELECT id, home, away, kickoff, status FROM fixtures").all();
   const junk = all.filter((f) => {
     if (isBadName(f.home)) return true;
     if (f.away && isBadName(f.away)) return true;
     return koMs(f.kickoff) == null;                 // "Invalid Date" rows
   });
+  // Preview mode: report exactly what would be deleted, touch nothing. This is
+  // what powers the confirmation modal — "delete ALL listed" with no visible
+  // list is how real settle-queue data got lost before.
+  if (dryRun) {
+    return res.json({ ok: true, dryRun: true, wouldDelete: junk.length,
+      rows: junk.map((f) => ({ id: f.id, label: `${f.home}${f.away ? " v " + f.away : ""} (${f.kickoff || "no date"})` })) });
+  }
   let n = 0;
   for (const f of junk) {
     db.prepare("DELETE FROM picks WHERE fixture_id=?").run(f.id);
@@ -850,7 +911,7 @@ export function wipeData(scope) {
       del("DELETE FROM compounding_bets", "missionBets");
       del("DELETE FROM showdown_bets", "showdownBets");
       db.prepare("UPDATE compounding_runs SET current_bankroll=starting_bankroll, peak_bankroll=starting_bankroll").run();
-      q.sdResetAll.run();
+      q.sdResetAll.run({ bankroll: SD.START });
     }
   })();
   console.log(`[reset] scope=${scope}`, wiped);

@@ -242,7 +242,11 @@ export const q = {
   sdModelByName: db.prepare(`SELECT * FROM showdown_models WHERE name=@name`),
   sdSeed: db.prepare(`INSERT OR IGNORE INTO showdown_models (name) VALUES (@name)`),
   sdSetBank: db.prepare(`UPDATE showdown_models SET current_bankroll=@bank WHERE id=@id`),
-  sdResetAll: db.prepare(`UPDATE showdown_models SET current_bankroll=100.0`),
+  // Bankroll must reset to the SAME value on both sides, or the leaderboard
+  // shows a nonsense "-90%" the moment starting_bankroll (season default,
+  // e.g. €1000) and current_bankroll (previously hardcoded to €100 here)
+  // disagree. Now parameterized so every caller resets to one true number.
+  sdResetAll: db.prepare(`UPDATE showdown_models SET current_bankroll=@bankroll, starting_bankroll=@bankroll`),
   sdRounds: db.prepare(`SELECT * FROM showdown_rounds ORDER BY id DESC`),
   sdNewRound: db.prepare(`INSERT INTO showdown_rounds (label) VALUES (@label)`),
   sdAddBet: db.prepare(`INSERT INTO showdown_bets (model_id, round_id, event, market, pick, odds, stake, reasoning, day) VALUES (@model_id,@round_id,@event,@market,@pick,@odds,@stake,@reasoning,@day)`),

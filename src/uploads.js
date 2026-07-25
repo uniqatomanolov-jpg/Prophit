@@ -63,15 +63,31 @@ export const manualId = (r) => {
 //   2. the same sport under two keys (nba + basketball) — two sidebar rows
 // This fixes what is already in the database.
 const OUTRIGHT_COMP_RX = /podium|top ?\d|outright|race winner|to win (the )?(race|title|tournament)/i;
-export function reclassifyFixtures() {
-  const out = { deletedOutright: 0, resportedRows: 0, merged: 0, examples: [] };
-  const all = db.prepare("SELECT id, sport, comp, home, away FROM fixtures").all();
 
-  // 1) an outright market stored as a matchup can never settle — remove it
-  for (const f of all) {
+// Shared by the real pass and the dry-run preview, so "what would be deleted"
+// can never drift from "what actually gets deleted".
+function findMisfiledOutrights() {
+  return db.prepare("SELECT id, sport, comp, home, away FROM fixtures").all().filter((f) => {
     const looksOutright = OUTRIGHT_COMP_RX.test(String(f.comp || ""));
     const isH2H = f.away && String(f.away).trim() !== "";
-    if (!looksOutright || !isH2H) continue;
+    return looksOutright && isH2H;
+  });
+}
+
+// Read-only preview for the confirmation modal — the only genuinely
+// destructive (non-reversible, non-merging) part of reclassifyFixtures is
+// this deletion pass; the sport/merge passes below fold data into a survivor
+// rather than discarding it, so they don't need the same guard.
+export function previewReclassify() {
+  const rows = findMisfiledOutrights();
+  return { wouldDelete: rows.length, rows: rows.map((f) => ({ id: f.id, label: `${f.sport}/${f.comp}: ${f.home} v ${f.away}` })) };
+}
+
+export function reclassifyFixtures() {
+  const out = { deletedOutright: 0, resportedRows: 0, merged: 0, examples: [] };
+
+  // 1) an outright market stored as a matchup can never settle — remove it
+  for (const f of findMisfiledOutrights()) {
     db.transaction(() => {
       db.prepare("DELETE FROM picks WHERE fixture_id=?").run(f.id);
       db.prepare("DELETE FROM odds WHERE fixture_id=?").run(f.id);
@@ -93,6 +109,7 @@ export function reclassifyFixtures() {
   // 3) renaming can create twins — fold them
   out.merged = mergeDuplicateFixtures().merged;
   out.fuzzyMerged = mergeFuzzyTwins().merged;
+  out.fuzzyMerged2 = mergeFuzzyTwinsBothSides().merged;
   out.raceMerged = mergeRaceOutrights().merged;
   console.log("[reclassify]", out);
   return out;
@@ -223,6 +240,63 @@ export function mergeRaceOutrights() {
     }
   }
   if (merged) console.log(`[race-merge] ${merged} outright twins folded`, examples);
+  return { merged, examples };
+}
+
+// —— TWO-SIDED FUZZY MERGE ————————————————————————————————
+// mergeFuzzyTwins() above requires an EXACT home-team slug, which misses the
+// case that actually showed up in production: "FC Arda Kardzhari" vs "FC Arda
+// Kardzhali" — the HOME name itself was misread, not just the away side. This
+// pass buckets by sport+day only and fuzzy-matches BOTH sides (including the
+// swapped order), so a one-letter vision typo on either team is caught while
+// two genuinely different matchups on the same day (same player, different
+// real opponent) still require BOTH sides to overlap and correctly stay apart.
+export function mergeFuzzyTwinsBothSides() {
+  const rows = db.prepare("SELECT id, sport, home, away, kickoff FROM fixtures WHERE away IS NOT NULL AND away != ''").all();
+  const buckets = {};
+  for (const f of rows) {
+    const key = `${idSlug(f.sport)}|${String(f.kickoff || "").slice(0, 10)}`;
+    (buckets[key] = buckets[key] || []).push(f);
+  }
+  const nPicks = db.prepare("SELECT COUNT(*) n FROM picks WHERE fixture_id=?");
+  let merged = 0; const examples = [];
+  const sameMatch = (a, b) => {
+    const direct = tokenSim(a.home, b.home) >= 0.5 && tokenSim(a.away, b.away) >= 0.5;
+    const crossed = tokenSim(a.home, b.away) >= 0.5 && tokenSim(a.away, b.home) >= 0.5;
+    return direct || crossed;
+  };
+  for (const key in buckets) {
+    const g = buckets[key];
+    if (g.length < 2) continue;
+    const parent = g.map((_, i) => i);
+    const find = (i) => (parent[i] === i ? i : (parent[i] = find(parent[i])));
+    for (let i = 0; i < g.length; i++)
+      for (let j = i + 1; j < g.length; j++)
+        if (sameMatch(g[i], g[j])) parent[find(i)] = find(j);
+    const clusters = {};
+    g.forEach((f, i) => { const r = find(i); (clusters[r] = clusters[r] || []).push(f); });
+    for (const r in clusters) {
+      const c = clusters[r];
+      if (c.length < 2) continue;
+      // survivor = the spelling most central to the cluster (shares the most
+      // tokens with its siblings on BOTH sides), tie-broken by pick count
+      const central = (f) => c.reduce((t, o) => o === f ? t : t + tokenSim(f.home, o.home) + tokenSim(f.away, o.away), 0);
+      c.sort((a, b) => central(b) - central(a) || nPicks.get(b.id).n - nPicks.get(a.id).n || String(a.id).localeCompare(String(b.id)));
+      const keep = c[0];
+      for (const dupe of c.slice(1)) {
+        db.transaction(() => {
+          db.prepare("UPDATE OR IGNORE odds SET fixture_id=? WHERE fixture_id=?").run(keep.id, dupe.id);
+          db.prepare("UPDATE OR IGNORE picks SET fixture_id=? WHERE fixture_id=?").run(keep.id, dupe.id);
+          db.prepare("DELETE FROM odds WHERE fixture_id=?").run(dupe.id);
+          db.prepare("DELETE FROM picks WHERE fixture_id=?").run(dupe.id);
+          db.prepare("DELETE FROM fixtures WHERE id=?").run(dupe.id);
+        })();
+        merged++;
+        if (examples.length < 5) examples.push(`"${dupe.home} v ${dupe.away}" \u2192 "${keep.home} v ${keep.away}"`);
+      }
+    }
+  }
+  if (merged) console.log(`[fuzzy-merge-2s] ${merged} twins folded (both-side match)`, examples);
   return { merged, examples };
 }
 
