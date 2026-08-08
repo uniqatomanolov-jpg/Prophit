@@ -30,6 +30,13 @@ app.use((req, res, next) => {
   next();
 });
 
+// Admin gate — defined HIGH so every route below can use it (do not move down).
+const requireAdmin = (req, res, next) => {
+  const key = process.env.ADMIN_KEY;
+  if (key && req.get("x-admin-key") !== key) return res.status(401).json({ error: "invalid admin key" });
+  next();
+};
+
 // —— API for the React frontend ——————————————————
 app.get("/api/fixtures", (req, res) => {
   const base = req.query.sport ? q.fixturesBySport.all({ sport: req.query.sport }) : q.fixturesAll.all();
@@ -97,6 +104,49 @@ app.post("/api/stripe/create-checkout-session", async (req, res) => {
   } catch (e) { console.error("[checkout]", e.message); res.status(400).json({ error: e.message }); }
 });
 
+// High-selectivity auto-pick: scan every priced game, take the single best QUALIFYING edge.
+// Sits out entirely when nothing clears the bar — no forced daily bet.
+const MISSION_MIN_EDGE = Number(process.env.MISSION_MIN_EDGE) || 4;    // %
+const MISSION_MAX_ODDS = Number(process.env.MISSION_MAX_ODDS) || 3.5;  // survival: no longshots
+app.post("/api/compounding/auto", requireAdmin, (req, res) => {
+  const run = q.cmpActiveRun.get();
+  if (!run) return res.status(400).json({ error: "no active run" });
+  const already = q.cmpBets.all({ run: run.id }).some((b) => b.status === "pending");
+  if (already) return res.json({ ...runView(run), note: "a mission bet is already live" });
+
+  const now = Date.now();
+  let best = null;
+  for (const f of q.fixturesAll.all()) {
+    if (f.status === "final") continue;
+    const ko = f.kickoff ? Date.parse(String(f.kickoff).replace(" ", "T")) : null;
+    if (ko != null && ko < now) continue;                       // future games only
+    const odds = q.oddsFor.all(f.id);
+    for (const p of q.picksFor.all(f.id)) {
+      if (p.model !== "claude" || !p.pick || p.edge == null) continue;
+      if (p.edge < MISSION_MIN_EDGE) continue;
+      const o = odds.find((x) => x.market === p.market &&
+        String(x.option).toLowerCase() === String(p.pick).toLowerCase());
+      const price = o ? o.price : p.price;
+      if (!price || price > MISSION_MAX_ODDS) continue;          // no longshots
+      // rank: highest edge, tie-break on shorter (safer) price
+      if (!best || p.edge > best.edge || (p.edge === best.edge && price < best.price))
+        best = { fixture_id: f.id, market: p.market, option: p.pick, odds: price,
+                 edge: p.edge, prob: p.probability, event: `${f.home} v ${f.away}` };
+    }
+  }
+  if (!best) return res.json({ ...runView(run), none: true,
+    reason: `no edge \u2265 ${MISSION_MIN_EDGE}% at odds \u2264 ${MISSION_MAX_ODDS} today \u2014 sitting out` });
+
+  const fair = best.prob > 0 ? 100 / best.prob : best.odds;
+  let stake = kellyStake(run.current_bankroll, best.odds, fair);
+  if (stake <= 0) stake = Math.round(run.current_bankroll * 0.02 * 100) / 100;
+  stake = Math.min(stake, run.current_bankroll);
+  q.cmpAddBet.run({ run: run.id, fid: best.fixture_id, market: best.market,
+    option: best.option, odds: best.odds, stake });
+  console.log(`[mission] auto-picked ${best.event} ${best.option} @${best.odds} (edge ${best.edge}%) stake \u20ac${stake}`);
+  res.json({ ...runView(q.cmpActiveRun.get()), picked: { ...best, stake } });
+});
+
 app.get("/api/health", (_, res) => res.json({ ok: true }));
 
 // External-cron endpoint: wakes the server and runs the full cycle.
@@ -162,12 +212,6 @@ app.get("/api/leaderboard/breakdown", (req, res) => {
   res.json(out);
 });
 
-// —— CSV upload (admin-only when ADMIN_KEY is set in the environment) ——
-const requireAdmin = (req, res, next) => {
-  const key = process.env.ADMIN_KEY;
-  if (key && req.get("x-admin-key") !== key) return res.status(401).json({ error: "invalid admin key" });
-  next();
-};
 
 // ===== AI SHOWDOWN: 4 models, €100 each, manage their own bankroll =====
 function showdownView() {
@@ -175,6 +219,7 @@ function showdownView() {
   const bets = q.sdBets.all();
   const byModel = {};
   for (const m of models) byModel[m.id] = { ...m, profit: Math.round((m.current_bankroll - m.starting_bankroll) * 100) / 100,
+    daily_limit: m.daily_limit || 100, deployed_today: q.sdDeployedToday.get({ mid: m.id }).used,
     wins: 0, losses: 0, pending: 0, bets: [] };
   for (const b of bets) { const mv = byModel[b.model_id]; if (!mv) continue; mv.bets.push(b);
     if (b.result === "win") mv.wins++; else if (b.result === "loss") mv.losses++; else mv.pending++; }
@@ -195,6 +240,10 @@ app.post("/api/showdown/bet", requireAdmin, (req, res) => {
   if (!m) return res.status(400).json({ error: "unknown model: " + model });
   if (!event || !market || !pick || !odds || !stake) return res.status(400).json({ error: "need event, market, pick, odds, stake" });
   if (Number(stake) > m.current_bankroll) return res.status(400).json({ error: model + " only has €" + m.current_bankroll });
+  const usedToday = q.sdDeployedToday.get({ mid: m.id }).used;
+  const limit = m.daily_limit || 100;
+  if (usedToday + Number(stake) > limit)
+    return res.status(400).json({ error: model + " has €" + (limit - usedToday).toFixed(0) + " left of its €" + limit + " daily budget (used €" + usedToday + ")" });
   let round = round_id;
   if (!round) { const rs = q.sdRounds.all(); round = rs.length ? rs[0].id : (q.sdNewRound.run({ label: "Round 1" }), q.sdRounds.all()[0].id); }
   q.sdAddBet.run({ model_id: m.id, round_id: round, event, market, pick, odds: Number(odds), stake: Number(stake), reasoning: reasoning || null });
