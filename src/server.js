@@ -2,17 +2,17 @@ import "dotenv/config";
 import express from "express";
 import cron from "node-cron";
 import { q, db, markFinal, gradePick } from "./db.js";
-import { syncFixtures, generatePicks, gradeFinished, correctFromScore, correctFromStat, STAT_FOR, STAT_LABEL, updateStatuses, repriceIncompletePicks } from "./jobs.js";
-import { parseScreenshot, parseResultsScreenshot, settleFromResults } from "./vision.js";
+import { syncFixtures, generatePicks, gradeFinished, correctFromScore } from "./jobs.js";
+import { parseScreenshot } from "./vision.js";
 import { settleCompoundingBet } from "./compounding.js";
-import { createCheckout, handleWebhook, billingEnabled, isPro, emailForSession } from "./billing.js";
+import { createCheckout, handleWebhook, billingEnabled, isPro } from "./billing.js";
 let predictBusy = false;
 function predictSoon() {
   if (predictBusy) return;
   predictBusy = true;
   generatePicks().catch((e) => console.error("[auto-predict]", e.message)).finally(() => { predictBusy = false; });
 }
-import { ingestEvents, ingestResults, isBadName, parseCSV, mergeDuplicateFixtures, canonSport, reclassifyFixtures, previewReclassify } from "./uploads.js";
+import { ingestEvents, ingestResults } from "./uploads.js";
 
 const app = express();
 // Stripe webhook needs the raw body for signature verification — mount BEFORE json parser.
@@ -30,148 +30,16 @@ app.use((req, res, next) => {
   next();
 });
 
-// Admin gate — defined HIGH so every route below can use it (do not move down).
-const requireAdmin = (req, res, next) => {
-  const key = process.env.ADMIN_KEY;
-  if (key && req.get("x-admin-key") !== key) return res.status(401).json({ error: "invalid admin key" });
-  next();
-};
-
-// —— REAL access control for locked/Pro content ——————————————————
-// Previously, "locked" picks were only hidden by the frontend's own render
-// logic while the API sent full pick data (option + reasoning) to every
-// caller regardless of subscription — trivially bypassable via devtools or
-// by calling /api/fixtures directly. This resolves the caller's real tier
-// server-side so locked data never leaves the server in the first place.
-function callerAccess(req) {
-  const adminKey = process.env.ADMIN_KEY;
-  if (adminKey && req.get("x-admin-key") === adminKey) return { admin: true, pro: true };
-  const email = req.get("x-user-email");
-  if (email && isPro(email)) return { admin: false, pro: true };
-  return { admin: false, pro: false };
-}
-// Mirrors the frontend's own thresholds (FREE picks/sport + 4-star "max-bet"
-// lock) so free users see exactly the same teaser, but the underlying
-// option/reasoning never reaches an unauthenticated client.
-const FREE_PER_SPORT = 2;
-function unitsForEdge(edge) {
-  if (edge == null || edge <= 0) return 0;
-  if (edge >= 40) return 10; if (edge >= 25) return 9; if (edge >= 15) return 8;
-  if (edge >= 10) return 6; if (edge >= 5) return 4; if (edge >= 2) return 2;
-  return 1;
-}
-// Star rating straight from edge. The old ceil(units/2) capped at 3 stars, so
-// the "max-bet (4★+) locks for free users" rule could never fire — the paywall
-// was silently vacuous. Thresholds now reach 5★.
-const starsForEdge = (edge) => (edge >= 8 ? 5 : edge >= 6 ? 4 : edge >= 4 ? 3 : edge >= 2 ? 2 : 1);
-// Redact a single pick row down to what a locked/free viewer is allowed to see.
-function redactPick(p, unlocked) {
-  if (unlocked) return p;
-  const claude = p.model === "claude";
-  const maxBet = claude && starsForEdge(p.edge) >= 4;
-  if (!maxBet) return p; // below max-bet threshold: shown even to free/locked viewers
-  const { pick, reasoning, ...rest } = p;
-  return { ...rest, locked: true };
-}
-// Apply free-quota + redaction across a sport's fixture list, same order the
-// frontend renders in (status!=="final" fixtures count toward the FREE quota).
-// Launch mode: everything unlocked for everyone. One switch to turn the
-// paywall back on when the free-trial phase ends — set FREE_FOR_ALL=false in
-// the host env and redeploy; nothing else has to change.
-const FREE_FOR_ALL = String(process.env.FREE_FOR_ALL ?? "true").toLowerCase() !== "false";
-
-function applyAccessGate(fixtures, access) {
-  if (FREE_FOR_ALL || access.pro || access.admin) return fixtures;
-  const bySport = {};
-  for (const f of fixtures) (bySport[f.sport] ||= []).push(f);
-  const out = [];
-  for (const sport of Object.keys(bySport)) {
-    let freeLeft = FREE_PER_SPORT;
-    for (const f of bySport[sport]) {
-      const countsTowardFree = f.status !== "final";
-      const unlockedFixture = !countsTowardFree || freeLeft > 0;
-      if (countsTowardFree && unlockedFixture) freeLeft--;
-      out.push({ ...f, picks: (f.picks || []).map((p) => redactPick(p, unlockedFixture)) });
-    }
-  }
-  return out;
-}
-
 // —— API for the React frontend ——————————————————
-// —— FEED HYGIENE ————————————————————————————————————
-// Two rules the public feed must never break:
-//   1. no fixture without real competitor names (parse junk)
-//   2. no fixture whose kickoff is long past (finished games must not linger)
-// Stale games stay in the DB and in /api/unsettled so admin can still settle them.
-const STALE_HOURS = Number(process.env.FEED_STALE_HOURS) || 8;
-const koMs = (k) => { if (!k) return null; const t = Date.parse(String(k).replace(" ", "T")); return Number.isNaN(t) ? null : t; };
-function feedReject(f) {
-  if (isBadName(f.home)) return "no-name";
-  if (f.away && isBadName(f.away)) return "no-name";
-  const ko = koMs(f.kickoff);
-  if (ko == null) return "no-date";                                  // unschedulable → never show
-  // A GUESSED kickoff ("tonight 20:00" because no date was visible on the
-  // source screenshot) is not real information. It survives the staleness
-  // check below for up to STALE_HOURS after the fake time even when the actual
-  // game finished yesterday — this was the main source of "outdated games"
-  // reports on the Live Feed. /api/value already excluded these; /api/fixtures
-  // (Live Feed, Headliners, match cards) did not, until now.
-  if (f.status !== "final" && f.date_assumed) return "date-assumed";
-  if (f.status !== "final" && ko < Date.now() - STALE_HOURS * 3600e3) return "stale";
-  return null;
-}
-
-// Value Board feed — biggest edges across EVERY sport, not just whatever
-// happened to fit in the fixture list. Junk rows are filtered the same way.
-app.get("/api/value", (req, res) => {
-  const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 60));
-  // an edge past this on a liquid market is almost always a misread line or a
-  // hallucinated probability, not free money — keep it off the customer board.
-  const MAX_EDGE = Number(process.env.VALUE_MAX_EDGE) || 15;
-  const rows = q.valuePicks.all({ limit: limit * 3 })
-    .filter((r) => !feedReject({ ...r, status: "upcoming" }))
-    .filter((r) => { if (r.edge > MAX_EDGE) { console.log(`[value] suppressed suspect edge ${r.edge}% — ${r.home} v ${r.away} ${r.market}`); return false; } return true; });
-  const access = callerAccess(req);
-  const seen = new Set(), out = [];
-  for (const r of rows) {                        // one entry per fixture — its best market
-    if (seen.has(r.id)) continue;
-    seen.add(r.id);
-    const row = { id: r.id, sport: r.sport, comp: r.comp, home: r.home, away: r.away, kickoff: r.kickoff,
-               market: r.market, pick: r.pick, edge: r.edge, probability: r.probability, price: r.price,
-               dateAssumed: !!r.date_assumed,
-               closing: r.closing_price ?? null,
-               clv: (r.price > 1 && r.closing_price > 1) ? Math.round((r.price / r.closing_price - 1) * 1000) / 10 : null,
-               reasoning: r.reasoning || null };
-    out.push(redactPick({ ...row, model: "claude" }, FREE_FOR_ALL || access.pro || access.admin));
-    if (out.length >= limit) break;
-  }
-  res.json(out);
-});
-
-// A pick with no matched price has no edge and no Kelly stake — it is still
-// Claude's opinion, but the UI must know it is incomplete rather than render
-// blanks that look like a bug.
-const withCompleteness = (p) => ({ ...p, incomplete: p.price == null || p.probability == null });
-
-let __lastStatusSweep = 0;
-function sweepStatuses() {
-  if (Date.now() - __lastStatusSweep < 60e3) return;      // at most once a minute
-  __lastStatusSweep = Date.now();
-  try { updateStatuses(); } catch (e) { console.warn("[status]", e.message); }
-}
-
 app.get("/api/fixtures", (req, res) => {
-  sweepStatuses();
   const base = req.query.sport ? q.fixturesBySport.all({ sport: req.query.sport }) : q.fixturesAll.all();
-  const clean = base.filter((f) => !feedReject(f));
-  const fixtures = clean.map((f) => ({
-    dateAssumed: !!f.date_assumed,
+  const fixtures = base.map((f) => ({
     ...f,
     entrants: f.entrants ? JSON.parse(f.entrants) : null,
     odds: q.oddsFor.all(f.id),
-    picks: q.picksFor.all(f.id).map(withCompleteness),
+    picks: q.picksFor.all(f.id),
   }));
-  res.json(applyAccessGate(fixtures, callerAccess(req)));
+  res.json(fixtures);
 });
 
 app.get("/api/leaderboard", (req, res) => {
@@ -229,91 +97,7 @@ app.post("/api/stripe/create-checkout-session", async (req, res) => {
   } catch (e) { console.error("[checkout]", e.message); res.status(400).json({ error: e.message }); }
 });
 
-// Called by the frontend right after Stripe redirects back with ?session_id=...
-// Confirms payment actually completed and returns the paying email so the
-// client can persist it (and send it as x-user-email on future requests).
-// This is what makes Pro survive a page refresh instead of resetting.
-app.get("/api/stripe/session", async (req, res) => {
-  try {
-    const email = await emailForSession(req.query.session_id);
-    if (!email) return res.status(400).json({ error: "session not found or not paid" });
-    res.json({ email, pro: isPro(email) });
-  } catch (e) { res.status(400).json({ error: e.message }); }
-});
-
-// High-selectivity auto-pick: scan every priced game, take the single best QUALIFYING edge.
-// Sits out entirely when nothing clears the bar — no forced daily bet.
-const MISSION_MIN_EDGE = Number(process.env.MISSION_MIN_EDGE) || 4;    // %
-const MISSION_MAX_ODDS = Number(process.env.MISSION_MAX_ODDS) || 3.5;  // survival: no longshots
-// A floor matters as much as a ceiling. Compounding to €1,000,000 from €100 is
-// a 10,000x climb: at 1.20 odds that is ~50 straight wins, at 2.00 odds ~14.
-// Below this the run cannot realistically finish, so the mission ignores them.
-const MISSION_MIN_ODDS = Number(process.env.MISSION_MIN_ODDS) || 1.7;
-// The mission picker, callable from the route AND the cron — this is the
-// autonomy: ValueBot chooses its own game and sizes its own stake by Kelly.
-function autoMissionPick() {
-  const run = q.cmpActiveRun.get();
-  if (!run) return { error: "no active run" };
-  const already = q.cmpBets.all({ run: run.id }).some((b) => b.status === "pending");
-  if (already) return { ...runView(run), note: "a mission bet is already live" };
-
-  const now = Date.now();
-  let best = null;
-  for (const f of q.fixturesAll.all()) {
-    if (f.status === "final") continue;
-    const ko = f.kickoff ? Date.parse(String(f.kickoff).replace(" ", "T")) : null;
-    if (ko != null && ko < now) continue;                       // future games only
-    const odds = q.oddsFor.all(f.id);
-    for (const p of q.picksFor.all(f.id)) {
-      if (p.model !== "claude" || !p.pick || p.edge == null) continue;
-      if (p.edge < MISSION_MIN_EDGE) continue;
-      const o = odds.find((x) => x.market === p.market &&
-        String(x.option).toLowerCase() === String(p.pick).toLowerCase());
-      const price = o ? o.price : p.price;
-      if (!price || price > MISSION_MAX_ODDS || price < MISSION_MIN_ODDS) continue;   // no longshots, no grinders
-      // rank: highest edge, tie-break on shorter (safer) price
-      if (!best || p.edge > best.edge || (p.edge === best.edge && price < best.price))
-        best = { fixture_id: f.id, market: p.market, option: p.pick, odds: price,
-                 edge: p.edge, prob: p.probability, event: `${f.home} v ${f.away}` };
-    }
-  }
-  if (!best) return { ...runView(run), none: true,
-    reason: `no edge \u2265 ${MISSION_MIN_EDGE}% at odds ${MISSION_MIN_ODDS}\u2013${MISSION_MAX_ODDS} today \u2014 sitting out` };
-
-  // Kelly from ValueBot's own probability — and if Kelly says zero, it SITS OUT.
-  // No token fallback stake on a bet its own math rejects.
-  const fair = best.prob > 0 ? 100 / best.prob : best.odds;
-  const stake = Math.min(kellyStake(run.current_bankroll, best.odds, fair), run.current_bankroll);
-  if (stake <= 0) return { ...runView(run), none: true,
-    reason: "Kelly sized the best available edge at zero — sitting out rather than forcing a bet" };
-  q.cmpAddBet.run({ run: run.id, fid: best.fixture_id, market: best.market,
-    option: best.option, odds: best.odds, stake });
-  console.log(`[mission] auto-picked ${best.event} ${best.option} @${best.odds} (edge ${best.edge}%) stake €${stake} (Kelly)`);
-  return { ...runView(q.cmpActiveRun.get()), picked: { ...best, stake } };
-}
-
-app.post("/api/compounding/auto", requireAdmin, (req, res) => {
-  const out = autoMissionPick();
-  if (out.error) return res.status(400).json(out);
-  res.json(out);
-});
-
-app.get("/", (_, res) => res.json({ ok: true, service: "valuebot-backend", docs: "/api/version" }));
 app.get("/api/health", (_, res) => res.json({ ok: true }));
-// aliases for external monitors/audit tools that probe conventional paths —
-// both serve the same feed as /api/fixtures
-app.get(["/api/live", "/api/games"], (req, res) => {
-  const qs = req.url.includes("?") ? req.url.slice(req.url.indexOf("?")) : "";
-  res.redirect(307, "/api/fixtures" + qs);
-});
-
-// —— BUILD IDENTITY ————————————————————————————————————
-// The page checks this on load. If the deployed backend is older than the page,
-// features that call routes it doesn't have would 404 with no explanation —
-// instead the UI reads these flags and says exactly what's missing.
-const BUILD = "2026-07-19b";   // bump on every deploy so /api/version proves which code is live
-const CAPABILITIES = ["mission-auto", "auto-settle", "purge-junk", "reset", "showdown-bulk", "feed-hygiene", "value-board", "undated-uploads", "schema-migrations", "dedupe", "reclassify", "results-vision", "undo-date-move", "status-sweep", "reprice", "live-alias", "settle-stats"];
-app.get("/api/version", (_, res) => res.json({ build: BUILD, capabilities: CAPABILITIES, resetOnBoot: process.env.RESET_ON_BOOT || null, freeForAll: FREE_FOR_ALL }));
 
 // External-cron endpoint: wakes the server and runs the full cycle.
 // Point a free pinger (e.g. cron-job.org) at GET /api/cron every few hours.
@@ -325,13 +109,6 @@ app.get("/api/cron", async (_, res) => {
   try {
     await generatePicks();
     await gradeFinished();
-    // ValueBot runs its own mission: once grading frees the slot, it selects the
-    // next game and stakes it by Kelly without waiting for a button.
-    try {
-      const m = autoMissionPick();
-      if (m.picked) console.log(`[cron] mission bet placed: ${m.picked.event} @${m.picked.odds} stake €${m.picked.stake}`);
-      else if (m.reason) console.log(`[cron] mission: ${m.reason}`);
-    } catch (e) { console.warn("[cron] mission:", e.message); }
     console.log("[cron] cycle complete");
   } catch (e) { console.error("[cron]", e.message); }
   finally { cronBusy = false; }
@@ -362,44 +139,14 @@ app.get("/api/track", (req, res) => {
       sport: h.sport, event: `${h.home} v ${h.away}`, competition: h.comp,
       kickoff: h.kickoff, score: h.score, market: h.market, pick: h.pick,
       odds: h.price, edge: h.edge, result: h.correct ? "win" : "loss",
-      closing: h.closing_price ?? null,
-      // CLV: how much better than the closing line the pick was taken at
-      clv: (h.price > 1 && h.closing_price > 1) ? Math.round((h.price / h.closing_price - 1) * 1000) / 10 : null,
-      why: h.reasoning || null,
     })),
     bySport: (sport === "all") ? q.bySport.all() : [],
-    clv: (() => { const c = q.clvStats.get({ sport }) || {};
-      return { n: c.n || 0, avg: c.n ? Math.round(c.avg_clv * 10) / 10 : null,
-               beatRate: c.n ? Math.round((c.beat / c.n) * 1000) / 10 : null }; })(),
-    updatedAt: new Date().toISOString(),
   });
 });
 
 // distinct markets present (for the per-market leaderboard selector)
-// Global headline stats for the hero row — deliberately NOT scoped to any
-// single sport, so it doesn't read "0 games priced" just because whichever
-// sport tab happens to be selected/default has no fixtures yet.
-app.get("/api/stats/hero", (_, res) => {
-  const row = db.prepare(`
-    SELECT
-      COUNT(DISTINCT f.id) AS games_priced,
-      SUM(CASE WHEN p.model='claude' AND p.edge IS NOT NULL AND p.edge > 0 THEN 1 ELSE 0 END) AS value_edges,
-      MAX(CASE WHEN p.model='claude' THEN p.edge END) AS best_edge
-    FROM fixtures f
-    JOIN picks p ON p.fixture_id = f.id
-    WHERE f.status != 'final' AND p.model='claude' AND p.pick IS NOT NULL
-  `).get();
-  res.json({
-    gamesPriced: row.games_priced || 0,
-    valueEdges: row.value_edges || 0,
-    bestEdge: row.best_edge ?? null,
-  });
-});
-
 app.get("/api/sports", (_, res) => {
-  const seen = new Set();
-  for (const r of q.distinctSports.all()) seen.add(canonSport(r.sport));
-  res.json([...seen]);
+  res.json(q.distinctSports.all().map((r) => r.sport));
 });
 
 app.get("/api/markets", (req, res) => {
@@ -415,6 +162,12 @@ app.get("/api/leaderboard/breakdown", (req, res) => {
   res.json(out);
 });
 
+// —— CSV upload (admin-only when ADMIN_KEY is set in the environment) ——
+const requireAdmin = (req, res, next) => {
+  const key = process.env.ADMIN_KEY;
+  if (key && req.get("x-admin-key") !== key) return res.status(401).json({ error: "invalid admin key" });
+  next();
+};
 
 // ===== AI SHOWDOWN: 4 models, €100 each, manage their own bankroll =====
 function showdownView() {
@@ -436,217 +189,16 @@ app.post("/api/showdown/round", requireAdmin, (req, res) => {
   res.json(showdownView());
 });
 
-// A model's live exposure: everything already staked on pending bets. Without this
-// four €100 bets could all be logged against one €100 bankroll.
-function exposureOf(modelId) {
-  return q.sdBets.all().filter((b) => b.model_id === modelId && b.result === "pending")
-    .reduce((a, b) => a + Number(b.stake || 0), 0);
-}
-function freeBankroll(m) { return Math.round((m.current_bankroll - exposureOf(m.id)) * 100) / 100; }
-
-// —— SHOWDOWN LEAGUE RULES ————————————————————————————————
-// Structure chosen to make the arena MEASURE something instead of being a coin
-// flip: identical slate (same information), a fixed daily budget (no bankroll
-// advantage), and a per-bet cap (nobody dies on one upset — which is exactly
-// what ended the first season).
-const SD = {
-  START: Number(process.env.SD_START_BANKROLL) || 1000,
-  DAILY: Number(process.env.SD_DAILY_BUDGET) || 100,   // must be deployed each day
-  MAX_BET: Number(process.env.SD_MAX_BET) || 50,       // cap on any single bet
-  MIN_BETS: Number(process.env.SD_MIN_BETS) || 1,
-  MAX_BETS: Number(process.env.SD_MAX_BETS) || 5,
-};
-const sdToday = () => new Date().toISOString().slice(0, 10);
-
-// Build today's slate from real fixtures: the most complete football games
-// with odds. Auto-suggested so curating it never becomes a daily chore.
-app.post("/api/showdown/slate/auto", requireAdmin, (req, res) => {
-  const day = String(req.body?.day || sdToday());
-  const n = Math.min(12, Math.max(2, Number(req.body?.count) || 8));
-  const sport = String(req.body?.sport || "soccer");
-  const rows = db.prepare(`
-    SELECT f.id, f.home, f.away, f.kickoff, COUNT(o.rowid) noffers
-      FROM fixtures f JOIN odds o ON o.fixture_id = f.id
-     WHERE f.sport = @sport AND f.status != 'final'
-       AND COALESCE(f.date_assumed,0) = 0
-       -- "Today's slate" must mean TODAY. Without an upper bound this pulled in
-       -- next week's fixtures and the arena looked wrong on day one.
-       AND date(replace(f.kickoff,' ','T')) = @day
-       AND datetime(replace(f.kickoff,' ','T')) > datetime('now')
-     GROUP BY f.id HAVING noffers >= 2
-     ORDER BY noffers DESC, f.kickoff ASC LIMIT @n`).all({ sport, n, day });
-  q.sdSlateClear.run({ day });
-  for (const f of rows) q.sdSlateAdd.run({ day, fixture_id: f.id, event: `${f.home} v ${f.away}`, kickoff: f.kickoff });
-  const built = q.sdSlateFor.all({ day });
-  res.json({ ok: true, day, slate: built,
-    note: built.length ? null : `no ${sport} fixtures with odds kick off on ${day} — upload today's card first, or set the date on the screenshot upload` });
-});
-
-// Weekly season reset — a busted model is back next Monday instead of sitting
-// dead on the board for the rest of time.
-app.post("/api/showdown/season/reset", requireAdmin, (req, res) => {
-  const keep = req.body?.keepHistory === true;
-  db.prepare("UPDATE showdown_models SET current_bankroll=?, starting_bankroll=?").run(SD.START, SD.START);
-  // Default is a CLEAN SLATE: bankrolls reset and every past call removed, so the
-  // board is not half old-format results (one €100 all-in) and half new league.
-  const del = keep
-    ? db.prepare("DELETE FROM showdown_bets WHERE result='pending'").run()
-    : db.prepare("DELETE FROM showdown_bets").run();
-  if (!keep) db.prepare("DELETE FROM showdown_slate").run();
-  console.log(`[showdown] season reset — all models to €${SD.START}, ${del.changes} bets cleared`);
-  res.json({ ok: true, bankroll: SD.START, cleared: del.changes, keptHistory: keep });
-});
-
-// Manual slate control. The auto-builder is a convenience, not a constraint —
-// the admin decides which games the arena plays. Add anything, including a
-// fixture that is not in the feed at all.
-app.post("/api/showdown/slate/add", requireAdmin, (req, res) => {
-  const day = String(req.body?.day || sdToday());
-  const raw = String(req.body?.event || "").trim();
-  if (!raw) return res.status(400).json({ error: "need an event name" });
-  // try to bind it to a real fixture so kick-off time and settlement can follow
-  const norm = (x) => String(x || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "")
-    .toLowerCase().replace(/[^a-z0-9]+/g, "");
-  const want = norm(raw);
-  const match = db.prepare("SELECT id, home, away, kickoff FROM fixtures WHERE status!='final'").all()
-    .find((f) => { const k = norm(`${f.home}${f.away}`); return k.includes(want) || want.includes(k); });
-  q.sdSlateAdd.run({
-    day,
-    fixture_id: match ? match.id : `manual-slate:${want.slice(0, 60)}`,
-    event: match ? `${match.home} v ${match.away}` : raw,
-    kickoff: match ? match.kickoff : null,
-  });
-  res.json({ ok: true, day, added: match ? `${match.home} v ${match.away}` : raw,
-             linkedToFixture: !!match, slate: q.sdSlateFor.all({ day }) });
-});
-
-app.post("/api/showdown/slate/remove", requireAdmin, (req, res) => {
-  const day = String(req.body?.day || sdToday());
-  const id = String(req.body?.fixture_id || "");
-  db.prepare("DELETE FROM showdown_slate WHERE day=? AND fixture_id=?").run(day, id);
-  res.json({ ok: true, slate: q.sdSlateFor.all({ day }) });
-});
-
-app.get("/api/showdown/slate", (req, res) => {
-  const day = String(req.query?.day || sdToday());
-  const slate = q.sdSlateFor.all({ day });
-  const budgets = q.sdModels.all().map((m) => {
-    const t = q.sdSpentToday.get({ mid: m.id, day });
-    return { name: m.name, bankroll: m.current_bankroll, spentToday: t.spent, betsToday: t.n,
-             remaining: Math.round((SD.DAILY - t.spent) * 100) / 100 };
-  });
-  res.json({ day, rules: SD, slate, budgets });
-});
-
-// Validate one prospective bet against the league rules.
-function checkSdRules(model, bet, day) {
-  const spent = q.sdSpentToday.get({ mid: model.id, day });
-  const stake = Number(bet.stake);
-  if (stake > SD.MAX_BET) return `stake €${stake} exceeds the €${SD.MAX_BET} single-bet cap`;
-  if (spent.n >= SD.MAX_BETS) return `${model.name} already has ${spent.n} bets today (max ${SD.MAX_BETS})`;
-  if (spent.spent + stake > SD.DAILY) return `€${stake} would put ${model.name} at €${spent.spent + stake} today (daily budget €${SD.DAILY}, €${Math.round((SD.DAILY - spent.spent) * 100) / 100} left)`;
-  const slate = q.sdSlateFor.all({ day });
-  if (slate.length) {
-    // Compare on TEAM NAMES, not the whole string: "UTA Arad vs Otelul Gala\u021bi"
-    // and "UTA Arad v Otelul Galati" are the same fixture, but differ by the
-    // separator ("vs" / "v" / "-") and by diacritics. Both must be neutralised.
-    const norm = (x) => String(x || "")
-      .normalize("NFD").replace(/[\u0300-\u036f]/g, "")   // Gala\u021bi -> Galati
-      .toLowerCase().replace(/[^a-z0-9 ]+/g, " ")
-      .replace(/\s+(vs?|v|@|-)\s+/g, " | ")               // any separator -> |
-      .replace(/\s+/g, " ").trim();
-    const parts = (x) => norm(x).split("|").map((t) => t.replace(/[^a-z0-9]/g, "")).filter(Boolean);
-    const want = parts(bet.event);
-    const ok = slate.some((sl) => {
-      const have = parts(sl.event);
-      if (!want.length || !have.length) return false;
-      // both teams must appear (either order), allowing one to be a prefix of the other
-      return want.every((w) => have.some((h) => h.includes(w) || w.includes(h)));
-    });
-    if (!ok) return `"${bet.event}" is not on today's slate — add it to the slate first (${slate.length} games listed)`;
-  }
-  return null;
-}
-
 app.post("/api/showdown/bet", requireAdmin, (req, res) => {
   const { model, event, market, pick, odds, stake, reasoning, round_id } = req.body || {};
   const m = q.sdModelByName.get({ name: model });
   if (!m) return res.status(400).json({ error: "unknown model: " + model });
   if (!event || !market || !pick || !odds || !stake) return res.status(400).json({ error: "need event, market, pick, odds, stake" });
-  const free = freeBankroll(m);
-  if (Number(stake) > free) return res.status(400).json({ error: `${model} has €${free} unstaked (bankroll €${m.current_bankroll}, €${exposureOf(m.id)} already live)` });
+  if (Number(stake) > m.current_bankroll) return res.status(400).json({ error: model + " only has €" + m.current_bankroll });
   let round = round_id;
   if (!round) { const rs = q.sdRounds.all(); round = rs.length ? rs[0].id : (q.sdNewRound.run({ label: "Round 1" }), q.sdRounds.all()[0].id); }
-  const day = String(req.body?.day || sdToday());
-  // the form must obey the same league rules as the bulk paste — otherwise the
-  // €50 cap and the daily budget are enforced in one path and not the other
-  const ruleErr = checkSdRules(m, { event, stake: Number(stake) }, day);
-  if (ruleErr) return res.status(400).json({ error: ruleErr });
-  q.sdAddBet.run({ model_id: m.id, round_id: round, event, market, pick,
-    odds: Number(odds), stake: Number(stake), reasoning: reasoning || null, day });
+  q.sdAddBet.run({ model_id: m.id, round_id: round, event, market, pick, odds: Number(odds), stake: Number(stake), reasoning: reasoning || null });
   res.json(showdownView());
-});
-
-// Bulk-log a whole round in one paste. Accepts either
-//   { bets: [ {model,event,market,pick,odds,stake,reasoning}, ... ] }
-//   { text: "Claude | Spain v Argentina | x12 | draw | 3.40 | 20 | reasoning…" }   (one per line)
-//   { text: "model,event,market,pick,odds,stake,reasoning\n..." }                   (CSV with header)
-// Every row is validated independently: good rows are logged, bad rows come back
-// with the reason, so one typo never silently drops a model's whole round.
-function parseBulkBets(body) {
-  if (Array.isArray(body?.bets)) return body.bets.map((b, i) => ({ ...b, _line: i + 1 }));
-  const text = String(body?.text || "").trim();
-  if (!text) return [];
-  const lines = text.split(/\r?\n/).filter((l) => l.trim());
-  const first = lines[0].toLowerCase();
-  if (/\bmodel\b/.test(first) && /\bpick\b/.test(first)) {
-    const rows = parseCSV(text);
-    return rows.map((r, i) => ({ model: r.model, event: r.event, market: r.market, pick: r.pick,
-      odds: r.odds, stake: r.stake, reasoning: r.reasoning || r.why || "", _line: i + 2 }));
-  }
-  return lines.map((l, i) => {
-    const parts = l.includes("|") ? l.split("|") : l.split(/\t/);
-    const [model, event, market, pick, odds, stake, ...rest] = parts.map((x) => String(x).trim());
-    return { model, event, market, pick, odds, stake, reasoning: rest.join(" | ").trim(), _line: i + 1 };
-  });
-}
-
-app.post("/api/showdown/bulk", requireAdmin, (req, res) => {
-  let rows;
-  try { rows = parseBulkBets(req.body || {}); }
-  catch (e) { return res.status(400).json({ error: "could not parse: " + e.message }); }
-  if (!rows.length) return res.status(400).json({ error: "nothing to log" });
-
-  let round = req.body?.round_id;
-  if (!round) { const rs = q.sdRounds.all(); round = rs.length ? rs[0].id : (q.sdNewRound.run({ label: "Round " + new Date().toISOString().slice(0, 10) }), q.sdRounds.all()[0].id); }
-
-  const day2 = String(req.body?.day || sdToday());
-  const added = [], rejected = [];
-  const spent = {};                                   // running exposure inside this paste
-  for (const r of rows) {
-    const name = String(r.model || "").trim();
-    const m = q.sdModelByName.get({ name }) ||
-              q.sdModels.all().find((x) => x.name.toLowerCase() === name.toLowerCase());
-    const fail = (why) => rejected.push({ line: r._line, row: `${r.model} · ${r.event} · ${r.pick}`, reason: why });
-    if (!m) { fail(`unknown model "${r.model}" (use Grok / ChatGPT / Gemini / Claude)`); continue; }
-    if (!r.event || !r.market || !r.pick) { fail("need event, market and pick"); continue; }
-    const odds = Number(String(r.odds).replace(",", "."));
-    const stake = Number(String(r.stake).replace(",", "."));
-    if (!(odds >= 1.01)) { fail(`odds "${r.odds}" invalid`); continue; }
-    if (!(stake > 0)) { fail(`stake "${r.stake}" invalid`); continue; }
-    const used = spent[m.id] || 0;
-    const free = Math.round((freeBankroll(m) - used) * 100) / 100;
-    if (stake > free) { fail(`${m.name} only has €${free} unstaked left`); continue; }
-    // league rules: single-bet cap, daily budget, bet count, slate membership
-    const ruleErr = checkSdRules(m, { ...r, stake }, day2);
-    if (ruleErr) { fail(ruleErr); continue; }
-    q.sdAddBet.run({ model_id: m.id, round_id: round, event: String(r.event).trim(), market: String(r.market).trim(),
-      pick: String(r.pick).trim(), odds, stake, reasoning: r.reasoning || null, day: day2 });
-    spent[m.id] = used + stake;
-    added.push({ model: m.name, event: r.event, market: r.market, pick: r.pick, odds, stake });
-  }
-  console.log(`[showdown bulk] added ${added.length}, rejected ${rejected.length}`);
-  res.json({ ...showdownView(), added: added.length, addedRows: added, rejected });
 });
 
 app.post("/api/showdown/settle", requireAdmin, (req, res) => {
@@ -663,13 +215,10 @@ app.post("/api/showdown/settle", requireAdmin, (req, res) => {
   res.json(showdownView());
 });
 
-// Legacy route kept as an alias — it now does the SAME thing as
-// /api/showdown/season/reset instead of a second, contradictory reset path
-// that hardcoded €100 while leaving starting_bankroll at the season default.
 app.post("/api/showdown/reset", requireAdmin, (_, res) => {
   db.prepare("DELETE FROM showdown_bets").run();
-  db.prepare("DELETE FROM showdown_slate").run();
-  q.sdResetAll.run({ bankroll: SD.START });
+  db.prepare("DELETE FROM showdown_rounds").run();
+  q.sdResetAll.run();
   res.json(showdownView());
 });
 
@@ -685,7 +234,7 @@ function kellyStake(bankroll, odds, fairOdds) {
   f = Math.max(0, Math.min(0.25, f));                        // never risk >25% on one bet
   return Math.round(bankroll * f * 100) / 100;
 }
-const MILESTONES = [100, 250, 1000, 5000, 25000, 100000, 400000, 1000000];
+const MILESTONES = [100, 1000, 10000, 100000, 1000000];
 function runView(run) {
   if (!run) return null;
   const bets = q.cmpBets.all({ run: run.id });
@@ -728,24 +277,7 @@ app.post("/api/compounding/settle", requireAdmin, (req, res) => {
 
 // POST the CSV text with Content-Type: text/csv
 // finished-but-unsettled games (for the manual settle panel)
-app.get("/api/unsettled", requireAdmin, async (_, res) => {
-  const { STAT_FOR, STAT_LABEL } = await import("./jobs.js");
-  const rows = q.unsettledPast.all().map((f) => {
-    // every ungraded pick on this fixture, with the market/line so the admin can
-    // see what is actually being settled — and which need a number of their own.
-    const picks = q.picksFor.all(f.id)
-      .filter((p) => p.correct == null)
-      .map((p) => {
-        const stat = STAT_FOR(p.market);
-        return { market: p.market, pick: p.pick, price: p.price, edge: p.edge,
-                 stat, statLabel: stat ? STAT_LABEL[stat] : null };
-      });
-    const needs = [...new Set(picks.map((p) => p.stat).filter(Boolean))]
-      .map((k) => ({ key: k, label: STAT_LABEL[k] }));
-    return { ...f, picks, needs };
-  });
-  res.json(rows);
-});
+app.get("/api/unsettled", requireAdmin, (_, res) => res.json(q.unsettledPast.all()));
 
 // Admin: delete one fixture (and its picks/odds) — for junk rows or long-finished games
 app.post("/api/fixture/delete", requireAdmin, (req, res) => {
@@ -770,193 +302,48 @@ app.post("/api/clear-finished", requireAdmin, (_, res) => {
   res.json({ ok: true, deleted: n });
 });
 
-// Admin: fold duplicate fixtures (same teams, same day, different spelling) into one.
-// Admin: clean up legacy rows — misfiled outrights and duplicate sport keys.
-// Results screenshot → settlement. Two calls by design: the first previews what
-// it read and what it matched, the second commits. Settling grades real picks,
-// so it never happens off a single unverified click.
-app.post("/api/upload-results-screenshot", requireAdmin, async (req, res) => {
-  try {
-    const { image, commit } = req.body || {};
-    if (!image) return res.status(400).json({ error: "no image" });
-    const m = String(image).match(/^data:(image\/[a-zA-Z+]+);base64,(.*)$/);
-    if (!m) return res.status(400).json({ error: "expected a base64 data URL" });
-    const { rows, skipped } = await parseResultsScreenshot(m[2], m[1]);
-    if (!rows.length) return res.json({ read: 0, skipped, matched: [], unmatched: [], graded: 0, dryRun: true });
-    const plan = await settleFromResults(rows, { dryRun: !commit });
-    res.json({ read: rows.length, skipped, ...plan });
-  } catch (e) {
-    console.error("[results-screenshot]", e.message);
-    res.status(400).json({ error: e.message });
-  }
-});
-
-// Commit a plan the admin has already seen (sent back verbatim from the preview).
-app.post("/api/settle-from-plan", requireAdmin, async (req, res) => {
-  try {
-    const rows = Array.isArray(req.body?.rows) ? req.body.rows : null;
-    if (!rows || !rows.length) return res.status(400).json({ error: "no rows to settle" });
-    res.json(await settleFromResults(rows, { dryRun: false }));
-  } catch (e) { res.status(400).json({ error: e.message }); }
-});
-
-app.post("/api/reclassify", requireAdmin, (req, res) => {
-  try {
-    if (req.body?.dryRun === true) return res.json({ ok: true, dryRun: true, ...previewReclassify() });
-    res.json({ ok: true, ...reclassifyFixtures(), reprice: repriceIncompletePicks() });
-  } catch (e) { console.error("[reclassify]", e.message); res.status(400).json({ error: e.message }); }
-});
-
-app.post("/api/dedupe", requireAdmin, (_, res) => {
-  try { res.json({ ok: true, ...mergeDuplicateFixtures() }); }
-  catch (e) { console.error("[dedupe]", e.message); res.status(400).json({ error: e.message }); }
-});
-
-// Admin: purge parse-junk already in the DB — fixtures whose "names" are prices,
-// market labels or league headers, plus anything with an unusable kickoff.
-app.post("/api/purge-junk", requireAdmin, (req, res) => {
-  const dryRun = req.body?.dryRun === true;
-  const all = db.prepare("SELECT id, home, away, kickoff, status FROM fixtures").all();
-  const junk = all.filter((f) => {
-    if (isBadName(f.home)) return true;
-    if (f.away && isBadName(f.away)) return true;
-    return koMs(f.kickoff) == null;                 // "Invalid Date" rows
-  });
-  // Preview mode: report exactly what would be deleted, touch nothing. This is
-  // what powers the confirmation modal — "delete ALL listed" with no visible
-  // list is how real settle-queue data got lost before.
-  if (dryRun) {
-    return res.json({ ok: true, dryRun: true, wouldDelete: junk.length,
-      rows: junk.map((f) => ({ id: f.id, label: `${f.home}${f.away ? " v " + f.away : ""} (${f.kickoff || "no date"})` })) });
-  }
-  let n = 0;
-  for (const f of junk) {
-    db.prepare("DELETE FROM picks WHERE fixture_id=?").run(f.id);
-    db.prepare("DELETE FROM odds WHERE fixture_id=?").run(f.id);
-    n += db.prepare("DELETE FROM fixtures WHERE id=?").run(f.id).changes;
-  }
-  console.log(`[purge-junk] deleted ${n} junk fixtures`);
-  res.json({ ok: true, deleted: n, examples: junk.slice(0, 5).map((f) => `${f.home} v ${f.away} (${f.kickoff})`) });
-});
-
 // One-click rescue: any manual game whose (guessed) kickoff slipped into the past but was never
 // settled gets bumped to the next evening slot → back on the Live Feed, out of the settle queue.
-// Bulk date-move, now REVERSIBLE. This button has cost real settle work twice;
-// a confirmation dialog is not enough protection for a bulk mutation, so every
-// run snapshots the previous kickoff/status and can be rolled back verbatim.
-let LAST_DATE_MOVE = null;
-
 app.post("/api/fix-dates", requireAdmin, (_, res) => {
   const now = new Date();
   let slot = new Date(now.toISOString().slice(0, 10) + "T20:00:00");
   if (slot.getTime() < now.getTime() + 30 * 60e3) slot = new Date(slot.getTime() + 24 * 3600e3);
   const k = slot.toISOString().slice(0, 10) + " 20:00";
-
-  const affected = db.prepare(`
-    SELECT id, kickoff, status, date_assumed FROM fixtures
-    WHERE id LIKE 'manual:%' AND status IN ('upcoming','live','awaiting_result') AND kickoff IS NOT NULL
-      AND datetime(replace(kickoff,' ','T')) < datetime('now')`).all();
-
-  const upd = db.prepare("UPDATE fixtures SET kickoff=?, status='upcoming', date_assumed=1 WHERE id=?");
-  db.transaction(() => { for (const f of affected) upd.run(k, f.id); })();
-
-  LAST_DATE_MOVE = { at: Date.now(), kickoff: k, rows: affected };
-  console.log(`[fix-dates] moved ${affected.length} games to ${k} (undo available)`);
-  res.json({ ok: true, moved: affected.length, kickoff: k, undoable: affected.length > 0,
-             games: affected.slice(0, 8).map((f) => f.id.replace(/^manual:[a-z0-9_]+:/, "").replace(/_v_/, " v ")) });
-});
-
-// Put every moved game back exactly where it was.
-app.post("/api/fix-dates/undo", requireAdmin, (_, res) => {
-  if (!LAST_DATE_MOVE || !LAST_DATE_MOVE.rows.length) return res.status(400).json({ error: "nothing to undo" });
-  const upd = db.prepare("UPDATE fixtures SET kickoff=?, status=?, date_assumed=? WHERE id=?");
-  db.transaction(() => {
-    for (const f of LAST_DATE_MOVE.rows) upd.run(f.kickoff, f.status, f.date_assumed || 0, f.id);
-  })();
-  const n = LAST_DATE_MOVE.rows.length;
-  console.log(`[fix-dates] undo: ${n} games restored`);
-  LAST_DATE_MOVE = null;
-  res.json({ ok: true, restored: n });
-});
-
-// —— AUTO-SETTLE ————————————————————————————————————————
-// Pulls final scores from the configured results feed and grades everything it
-// can match. Safe to call repeatedly; already-final games are skipped.
-app.get("/api/settle/status", async (_, res) => {
-  const { resultsFeedStatus } = await import("./results.js");
-  res.json(resultsFeedStatus());
-});
-app.post("/api/settle/auto", requireAdmin, async (req, res) => {
-  try {
-    const { autoSettle } = await import("./results.js");
-    res.json(await autoSettle({ daysFrom: Math.min(3, Number(req.body?.daysFrom) || 3), dryRun: !!req.body?.dryRun }));
-  } catch (e) { console.error("[auto-settle]", e.message); res.status(400).json({ error: e.message }); }
-});
-
-// —— DATA RESET ————————————————————————————————————————
-// scope: "record"   → wipe picks + outcomes (track record starts clean, fixtures stay)
-//        "fixtures" → wipe fixtures + odds + picks + outcomes (feed starts clean)
-//        "all"      → everything above plus mission + showdown bets
-export function wipeData(scope) {
-  const wiped = {};
-  const del = (sql, label) => { wiped[label] = db.prepare(sql).run().changes; };
-  db.transaction(() => {
-    del("DELETE FROM picks", "picks");
-    del("DELETE FROM outcomes", "outcomes");
-    if (scope === "fixtures" || scope === "all") {
-      del("DELETE FROM odds", "odds");
-      del("DELETE FROM fixtures", "fixtures");
-    }
-    if (scope === "all") {
-      del("DELETE FROM compounding_bets", "missionBets");
-      del("DELETE FROM showdown_bets", "showdownBets");
-      db.prepare("UPDATE compounding_runs SET current_bankroll=starting_bankroll, peak_bankroll=starting_bankroll").run();
-      q.sdResetAll.run({ bankroll: SD.START });
-    }
-  })();
-  console.log(`[reset] scope=${scope}`, wiped);
-  return wiped;
-}
-
-app.post("/api/reset", requireAdmin, (req, res) => {
-  const scope = String(req.body?.scope || "");
-  if (!["record", "fixtures", "all"].includes(scope)) return res.status(400).json({ error: 'scope must be record | fixtures | all' });
-  res.json({ ok: true, scope, wiped: wipeData(scope) });
+  const r = db.prepare(`
+    UPDATE fixtures SET kickoff=@k, status='upcoming'
+    WHERE id LIKE 'manual:%' AND status='upcoming' AND kickoff IS NOT NULL
+      AND datetime(replace(kickoff,' ','T')) < datetime('now')
+  `).run({ k });
+  console.log(`[fix-dates] moved ${r.changes} games to ${k}`);
+  res.json({ ok: true, moved: r.changes, kickoff: k });
 });
 
 // settle one game by typing the final score — grades every score-derivable pick
 app.post("/api/settle", requireAdmin, (req, res) => {
   try {
-    const { id, hs, as, stats } = req.body || {};
+    const { id, hs, as } = req.body || {};
     const H = Number(hs), A = Number(as);
     if (!id || Number.isNaN(H) || Number.isNaN(A)) return res.status(400).json({ error: "need id, hs, as" });
     const f = q.fixtureById ? q.fixtureById.get(id) : db.prepare("SELECT * FROM fixtures WHERE id=?").get(id);
     if (!f) return res.status(404).json({ error: "fixture not found" });
     markFinal.run({ id, score: `${H}-${A}` });
-    let graded = 0, pushed = 0;
-    const pending = [];
+    let graded = 0, skipped = 0;
     for (const pk of q.picksFor.all(id)) {
-      let c = correctFromScore(pk.market, pk.pick, H, A, f.home, f.away);
-      if (c == null) {
-        // market the scoreline can't decide — use the number typed for it, if given
-        const key = STAT_FOR(pk.market);
-        if (key && stats && stats[key] != null && stats[key] !== "") c = correctFromStat(pk.market, pk.pick, stats[key]);
-      }
+      const c = correctFromScore(pk.market, pk.pick, H, A, f.home, f.away);
       if (c != null) { gradePick.run({ correct: c, fixture_id: id, model: pk.model, market: pk.market }); graded++; }
-      else if (STAT_FOR(pk.market)) pending.push(`${pk.market} (needs ${STAT_LABEL[STAT_FOR(pk.market)]})`);
-      else pushed++;
+      else skipped++;
     }
-    res.json({ ok: true, score: `${H}-${A}`, graded, pushed, pending });
+    res.json({ ok: true, score: `${H}-${A}`, graded, skipped });
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
 
 app.post("/api/upload-screenshot", requireAdmin, async (req, res) => {
   try {
-    let { image, mediaType, day } = req.body || {};
+    let { image, mediaType } = req.body || {};
     if (!image) return res.status(400).json({ error: "no image" });
     const m = String(image).match(/^data:(image\/\w+);base64,(.*)$/);
     if (m) { mediaType = m[1]; image = m[2]; }
-    const out = await parseScreenshot(image, mediaType || "image/png", { day: day || null });
+    const out = await parseScreenshot(image, mediaType || "image/png");
     res.json(out);
     if (out.fixtures > 0) { console.log("[screenshot] auto-predicting…"); predictSoon(); }
   } catch (e) { console.error("[screenshot]", e.message); res.status(400).json({ error: e.message }); }
@@ -982,67 +369,7 @@ app.post("/api/jobs/grade", async (_, res) => { await gradeFinished(); res.json(
 
 // —— schedule ————————————————————————————————————
 cron.schedule("30 */6 * * *", () => generatePicks().catch(console.error)); // picks after each sync
-// Autonomous settlement loop. gradeFinished() already runs the results feed,
-// the manual-score settler and the status sweep; running it every 15 minutes
-// means a finished game is normally graded before you would have opened the tab.
-cron.schedule("*/15 * * * *", async () => {
-  try {
-    const r = await gradeFinished();
-    LAST_AUTO = { at: Date.now(), ...(r || {}) };
-  } catch (e) { console.error("[cron:grade]", e.message); LAST_AUTO = { at: Date.now(), error: e.message }; }
-});
-let LAST_AUTO = null;
-// what the robot did last, so the admin panel can show it rather than leaving
-// you to guess whether anything is running
-app.get("/api/settle/last", requireAdmin, async (_, res) => {
-  const { resultsFeedStatus } = await import("./results.js");
-  const pending = q.unsettledPast.all().length;
-  res.json({ last: LAST_AUTO, feed: resultsFeedStatus(), pendingManual: pending });
-});
-
-// —— API ERROR CONTRACT ————————————————————————————————————
-// Anything under /api must answer with JSON, always. Express's default handler
-// returns an HTML error page, which the frontend can only report as "Server
-// returned HTML, not JSON" — technically true, useless for diagnosis. These two
-// handlers turn any unmatched route or thrown error into a readable JSON error.
-app.use("/api", (req, res) => {
-  res.status(404).json({ error: `no such endpoint: ${req.method} ${req.path}` });
-});
-app.use((err, req, res, _next) => {
-  const msg = err && err.message ? err.message : String(err);
-  console.error(`[api:500] ${req.method} ${req.originalUrl} \u2014 ${msg}`);
-  if (String(req.path).startsWith("/api")) return res.status(500).json({ error: msg });
-  res.status(500).send("Internal error");
-});
+cron.schedule("*/30 * * * *", () => gradeFinished().catch(console.error)); // grade every 30 min
 
 const port = process.env.PORT || 3001;
-// FRESH START ON DEPLOY
-// Set RESET_ON_BOOT=record|fixtures|all in the host env and redeploy: the wipe runs
-// before the server accepts traffic. This is the way to clear data on a host whose
-// deployed build is too old to expose /api/reset — the same deploy that ships the
-// new code also clears the record.
-// REMOVE THE VAR AFTERWARDS or every future deploy wipes again (the UI warns you).
-// data honesty on every boot: statuses reflect the clock, price-less picks get
-// one more chance to match their odds. Both are idempotent.
-try {
-  updateStatuses();
-  repriceIncompletePicks();
-  // deploy-proof cleanup: misfiled outrights (the "Podium Finish under Darts"
-  // class of row) and duplicate sport keys are removed on every boot, so a
-  // deploy alone fixes the sidebar — no admin button required.
-  const rc = reclassifyFixtures();
-  if (rc.deletedOutright || rc.resportedRows || rc.merged) console.log("[boot] reclassified:", rc);
-} catch (e) { console.warn("[boot]", e.message); }
-
-const RESET_ON_BOOT = String(process.env.RESET_ON_BOOT || "").trim();
-if (RESET_ON_BOOT) {
-  if (["record", "fixtures", "all"].includes(RESET_ON_BOOT)) {
-    console.log(`[boot] RESET_ON_BOOT=${RESET_ON_BOOT} — wiping before startup`);
-    console.log("[boot] wiped:", wipeData(RESET_ON_BOOT));
-    console.log("[boot] \u26a0 remove RESET_ON_BOOT from your env now, or the next deploy wipes again");
-  } else {
-    console.warn(`[boot] RESET_ON_BOOT="${RESET_ON_BOOT}" is not one of record|fixtures|all — ignoring`);
-  }
-}
-
 app.listen(port, () => console.log(`Prophit backend on :${port}`));

@@ -11,7 +11,7 @@ CREATE TABLE IF NOT EXISTS fixtures (
   home TEXT, away TEXT,            -- h2h only
   entrants JSON,                   -- race only: ordered grid/field of names
   kickoff TEXT,
-  status TEXT DEFAULT 'upcoming',  -- upcoming | live | awaiting_result | final
+  status TEXT DEFAULT 'upcoming',  -- upcoming | live | final
   score TEXT,
   raw JSON
 );
@@ -41,8 +41,8 @@ CREATE TABLE IF NOT EXISTS users (
 CREATE TABLE IF NOT EXISTS showdown_models (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT UNIQUE,
-  starting_bankroll REAL DEFAULT 1000.0,
-  current_bankroll REAL DEFAULT 1000.0,
+  starting_bankroll REAL DEFAULT 100.0,
+  current_bankroll REAL DEFAULT 100.0,
   status TEXT DEFAULT 'active',
   created_at TEXT DEFAULT (datetime('now'))
 );
@@ -51,13 +51,6 @@ CREATE TABLE IF NOT EXISTS showdown_rounds (
   label TEXT,
   status TEXT DEFAULT 'open',
   created_at TEXT DEFAULT (datetime('now'))
-);
-CREATE TABLE IF NOT EXISTS showdown_slate (
-  day TEXT NOT NULL,
-  fixture_id TEXT NOT NULL,
-  event TEXT,
-  kickoff TEXT,
-  PRIMARY KEY (day, fixture_id)
 );
 CREATE TABLE IF NOT EXISTS showdown_bets (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -68,15 +61,14 @@ CREATE TABLE IF NOT EXISTS showdown_bets (
   pick TEXT,
   odds REAL,
   stake REAL,
-  reasoning TEXT,
   result TEXT DEFAULT 'pending',
   created_at TEXT DEFAULT (datetime('now'))
 );
 CREATE TABLE IF NOT EXISTS compounding_runs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT DEFAULT 'Run to a Million',
-  starting_bankroll REAL DEFAULT 1000.0,
-  current_bankroll REAL DEFAULT 1000.0,
+  starting_bankroll REAL DEFAULT 100.0,
+  current_bankroll REAL DEFAULT 100.0,
   peak_bankroll REAL DEFAULT 100.0,
   status TEXT DEFAULT 'active',
   created_at TEXT DEFAULT (datetime('now'))
@@ -98,40 +90,15 @@ CREATE TABLE IF NOT EXISTS outcomes (
 );
 `);
 
-// ————————————————————————————————————————————————————————————————
-// MIGRATIONS — must run BEFORE any db.prepare() below.
-// CREATE TABLE IF NOT EXISTS never alters an existing table, so a database
-// created by an older build keeps its old columns. Preparing a statement that
-// names a missing column throws at import time and the process exits 1 — which
-// is exactly how a deploy dies with "table X has no column named Y".
-// Every column added after the first release belongs in this list.
-// ————————————————————————————————————————————————————————————————
-const MIGRATIONS = {
-  picks: ["probability REAL", "edge REAL", "settled_odds REAL", "settled_fair_price REAL",
-          "edge_at_placement REAL", "settled_at TEXT", "closing_price REAL", "closing_at TEXT"],
-  showdown_bets: ["reasoning TEXT", "day TEXT"],
-  fixtures: ["entrants TEXT", "date_assumed INTEGER DEFAULT 0"],
-  compounding_bets: ["fair_price REAL", "settled_at TEXT"],
-};
-for (const [table, cols] of Object.entries(MIGRATIONS)) {
-  let have;
-  try { have = new Set(db.prepare(`PRAGMA table_info(${table})`).all().map((r) => r.name)); }
-  catch { continue; }                                   // table doesn't exist yet — CREATE made it current
-  for (const col of cols) {
-    const name = col.split(/\s+/)[0];
-    if (have.has(name)) continue;
-    try { db.exec(`ALTER TABLE ${table} ADD COLUMN ${col}`); console.log(`[migrate] ${table}.${name} added`); }
-    catch (e) { console.warn(`[migrate] ${table}.${name} failed: ${e.message}`); }
-  }
+// safe migration — add value-betting columns if an older DB predates them
+for (const col of ["probability REAL", "edge REAL", "settled_odds REAL", "settled_fair_price REAL", "edge_at_placement REAL", "settled_at TEXT"]) {
+  try { db.exec(`ALTER TABLE picks ADD COLUMN ${col}`); } catch { /* already exists */ }
 }
 
 export const upsertFixture = db.prepare(`
-  INSERT INTO fixtures (id, sport, comp, home, away, entrants, kickoff, status, score, raw, date_assumed)
-  VALUES (@id, @sport, @comp, @home, @away, @entrants, @kickoff, @status, @score, @raw, @date_assumed)
-  ON CONFLICT(id) DO UPDATE SET status=@status, score=@score, raw=@raw,
-    entrants=COALESCE(@entrants, entrants), kickoff=COALESCE(@kickoff, kickoff), comp=@comp,
-    -- a REAL date always beats a guessed one; never downgrade a known kickoff
-    date_assumed=CASE WHEN @date_assumed=0 THEN 0 ELSE COALESCE(date_assumed,0) END
+  INSERT INTO fixtures (id, sport, comp, home, away, entrants, kickoff, status, score, raw)
+  VALUES (@id, @sport, @comp, @home, @away, @entrants, @kickoff, @status, @score, @raw)
+  ON CONFLICT(id) DO UPDATE SET status=@status, score=@score, raw=@raw, entrants=COALESCE(@entrants, entrants), kickoff=COALESCE(@kickoff, kickoff), comp=@comp
 `);
 
 export const upsertOdd = db.prepare(`
@@ -159,47 +126,14 @@ export const gradePick = db.prepare(`
 export const markFinal = db.prepare(`UPDATE fixtures SET status='final', score=@score WHERE id=@id`);
 
 export const q = {
-  upcoming: db.prepare(`SELECT * FROM fixtures WHERE status IN ('upcoming','live','awaiting_result') ORDER BY kickoff`),
+  upcoming: db.prepare(`SELECT * FROM fixtures WHERE status='upcoming' ORDER BY kickoff`),
   finishedUngraded: db.prepare(`
     SELECT DISTINCT f.* FROM fixtures f JOIN picks p ON p.fixture_id=f.id
     WHERE f.status='final' AND p.correct IS NULL`),
-  fixturesAll: db.prepare(`SELECT * FROM fixtures ORDER BY kickoff DESC LIMIT 400`),
-  // Every positive-edge upcoming Claude pick, ALL sports, ranked by edge.
-  // Computed in SQL so the Value Board can never be truncated by a per-sport or
-  // row-count cap the way a "fetch the fixture list and filter" approach was.
-  valuePicks: db.prepare(`
-    SELECT f.id, f.sport, f.comp, f.home, f.away, f.kickoff, f.date_assumed,
-           p.market, p.pick, p.edge, p.probability, p.price, p.closing_price, p.reasoning
-      FROM picks p JOIN fixtures f ON f.id = p.fixture_id
-     WHERE p.model = 'claude' AND p.correct IS NULL AND p.edge IS NOT NULL AND p.edge > 0
-       AND f.status != 'final' AND f.kickoff IS NOT NULL
-       -- A GUESSED kickoff is always "tonight 20:00", so a game that finished
-       -- yesterday passes a naive "> now" test all day. If we cannot date a
-       -- fixture we cannot promise it is still bettable: keep it off the board.
-       AND COALESCE(f.date_assumed,0) = 0
-       AND datetime(replace(f.kickoff,' ','T')) > datetime('now')  -- only bettable BEFORE kick-off
-     ORDER BY p.edge DESC LIMIT @limit`),
+  fixturesAll: db.prepare(`SELECT * FROM fixtures ORDER BY kickoff DESC LIMIT 200`),
   fixturesBySport: db.prepare(`SELECT * FROM fixtures WHERE sport=@sport ORDER BY kickoff DESC LIMIT 100`),
   oddsFor: db.prepare(`SELECT market, option, price FROM odds WHERE fixture_id=?`),
-  picksFor: db.prepare(`SELECT model, market, pick, confidence, price, correct, reasoning, probability, edge, closing_price FROM picks WHERE fixture_id=?`),
-  // —— CLV (closing line value) ————————————————————————
-  // The price still showing at kick-off is the closing line. Beating it is the
-  // strongest available evidence that an edge was real rather than lucky.
-  picksNeedingClose: db.prepare(`
-    SELECT p.fixture_id, p.model, p.market, p.pick, p.price, f.home, f.away
-      FROM picks p JOIN fixtures f ON f.id = p.fixture_id
-     WHERE p.closing_price IS NULL AND f.kickoff IS NOT NULL
-       AND datetime(replace(f.kickoff,' ','T')) <= datetime('now')
-       AND datetime(replace(f.kickoff,' ','T')) > datetime('now','-2 days')`),
-  setClosing: db.prepare(`UPDATE picks SET closing_price=@closing, closing_at=datetime('now')
-     WHERE fixture_id=@fixture_id AND model=@model AND market=@market`),
-  clvStats: db.prepare(`
-    SELECT COUNT(*) n, AVG((p.price / p.closing_price - 1.0) * 100.0) avg_clv,
-           SUM(CASE WHEN p.price > p.closing_price THEN 1 ELSE 0 END) beat
-      FROM picks p
-     WHERE p.model='claude' AND p.closing_price IS NOT NULL AND p.closing_price > 1
-       AND p.price IS NOT NULL AND p.price > 1
-       AND (@sport = 'all' OR EXISTS (SELECT 1 FROM fixtures f WHERE f.id=p.fixture_id AND f.sport=@sport))`),
+  picksFor: db.prepare(`SELECT model, market, pick, confidence, price, correct, reasoning, probability, edge FROM picks WHERE fixture_id=?`),
   hasPicks: db.prepare(`SELECT COUNT(*) n FROM picks WHERE fixture_id=? AND model=?`),
   distinctMarkets: db.prepare(`
     SELECT DISTINCT p.market FROM picks p JOIN fixtures f ON f.id = p.fixture_id
@@ -207,7 +141,7 @@ export const q = {
   picksList: db.prepare(`
     SELECT p.fixture_id, f.sport, f.comp, f.home, f.away, f.kickoff, f.status, f.score,
            p.model, p.market, p.pick, p.confidence, p.price, p.reasoning, p.created_at,
-           p.correct, p.probability, p.edge, p.closing_price, o.outcome
+           p.correct, p.probability, p.edge, o.outcome
     FROM picks p
     JOIN fixtures f ON f.id = p.fixture_id
     LEFT JOIN outcomes o ON o.fixture_id = p.fixture_id AND o.market = p.market
@@ -234,22 +168,13 @@ export const q = {
     GROUP BY f.sport HAVING COUNT(*) >= 1 ORDER BY roi DESC`),
   cmpActiveRun: db.prepare(`SELECT * FROM compounding_runs WHERE status='active' ORDER BY id DESC LIMIT 1`),
   sdModels: db.prepare(`SELECT * FROM showdown_models ORDER BY current_bankroll DESC, name ASC`),
-  sdSlateFor: db.prepare(`SELECT * FROM showdown_slate WHERE day=@day ORDER BY kickoff`),
-  sdSlateAdd: db.prepare(`INSERT OR REPLACE INTO showdown_slate (day, fixture_id, event, kickoff) VALUES (@day,@fixture_id,@event,@kickoff)`),
-  sdSlateClear: db.prepare(`DELETE FROM showdown_slate WHERE day=@day`),
-  // how much a model has already deployed today — drives the €100/day rule
-  sdSpentToday: db.prepare(`SELECT COALESCE(SUM(stake),0) spent, COUNT(*) n FROM showdown_bets WHERE model_id=@mid AND day=@day`),
   sdModelByName: db.prepare(`SELECT * FROM showdown_models WHERE name=@name`),
   sdSeed: db.prepare(`INSERT OR IGNORE INTO showdown_models (name) VALUES (@name)`),
   sdSetBank: db.prepare(`UPDATE showdown_models SET current_bankroll=@bank WHERE id=@id`),
-  // Bankroll must reset to the SAME value on both sides, or the leaderboard
-  // shows a nonsense "-90%" the moment starting_bankroll (season default,
-  // e.g. €1000) and current_bankroll (previously hardcoded to €100 here)
-  // disagree. Now parameterized so every caller resets to one true number.
-  sdResetAll: db.prepare(`UPDATE showdown_models SET current_bankroll=@bankroll, starting_bankroll=@bankroll`),
+  sdResetAll: db.prepare(`UPDATE showdown_models SET current_bankroll=100.0`),
   sdRounds: db.prepare(`SELECT * FROM showdown_rounds ORDER BY id DESC`),
   sdNewRound: db.prepare(`INSERT INTO showdown_rounds (label) VALUES (@label)`),
-  sdAddBet: db.prepare(`INSERT INTO showdown_bets (model_id, round_id, event, market, pick, odds, stake, reasoning, day) VALUES (@model_id,@round_id,@event,@market,@pick,@odds,@stake,@reasoning,@day)`),
+  sdAddBet: db.prepare(`INSERT INTO showdown_bets (model_id, round_id, event, market, pick, odds, stake) VALUES (@model_id,@round_id,@event,@market,@pick,@odds,@stake)`),
   sdBets: db.prepare(`SELECT b.*, m.name AS model FROM showdown_bets b JOIN showdown_models m ON m.id=b.model_id ORDER BY b.id DESC`),
   sdBetById: db.prepare(`SELECT * FROM showdown_bets WHERE id=@id`),
   sdSetBet: db.prepare(`UPDATE showdown_bets SET result=@result WHERE id=@id`),
@@ -272,12 +197,11 @@ export const q = {
     SELECT f.id, f.sport, f.comp, f.home, f.away, f.kickoff,
       (SELECT COUNT(*) FROM picks p WHERE p.fixture_id=f.id) npicks
     FROM fixtures f
-    WHERE f.status IN ('upcoming','live','awaiting_result') AND f.kickoff IS NOT NULL
-      AND COALESCE(f.date_assumed,0) = 0
+    WHERE f.status='upcoming' AND f.kickoff IS NOT NULL
       AND datetime(replace(f.kickoff,' ','T')) < datetime('now','-2 hours')
     ORDER BY f.kickoff DESC LIMIT 100`),
   manualPending: db.prepare(`
-    SELECT * FROM fixtures WHERE id LIKE 'manual:%' AND status IN ('upcoming','live','awaiting_result') AND kickoff IS NOT NULL`),
+    SELECT * FROM fixtures WHERE id LIKE 'manual:%' AND status='upcoming' AND kickoff IS NOT NULL`),
   claudeStats: db.prepare(`
     SELECT COUNT(*) total,
       SUM(p.correct) wins,
@@ -294,7 +218,6 @@ export const q = {
       COALESCE(p.settled_odds, p.price) AS price,
       p.probability,
       COALESCE(p.edge_at_placement, p.edge) AS edge,
-      p.closing_price, p.reasoning,
       p.correct, p.settled_at
     FROM picks p JOIN fixtures f ON f.id=p.fixture_id
     WHERE p.model='claude' AND p.correct IS NOT NULL AND (@sport='all' OR f.sport=@sport)
@@ -311,8 +234,6 @@ export const q = {
       AND (@market = 'all' OR p.market = @market)
     GROUP BY p.model ORDER BY accuracy DESC`),
 };
-
-// (showdown_bets.reasoning is handled in MIGRATIONS above, before any prepare())
 
 // seed the 4 AI competitors once
 ["Grok","ChatGPT","Gemini","Claude"].forEach((name)=>{ try { q.sdSeed.run({ name }); } catch {} });
