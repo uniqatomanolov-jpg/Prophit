@@ -1,0 +1,149 @@
+/*
+ * Admin gate styling.
+ *
+ * Kept to one small file with no dependency on the app's stylesheet, because
+ * this screen has to render correctly before the application bundle is
+ * allowed to load. Tokens mirror src/styles/terminal.css so the login screen
+ * and the console it guards look like the same product.
+ */
+#aifight-gate {
+  --g-void: #05070a;
+  --g-base: #0a0d13;
+  --g-raised: #11151d;
+  --g-line: #1f2530;
+  --g-line-strong: #2b3341;
+  --g-text: #e8edf5;
+  --g-muted: #7b8798;
+  --g-accent: #2ee6a8;
+  --g-loss: #ff5c72;
+
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  display: grid;
+  place-items: center;
+  padding: 1.5rem;
+  background: var(--g-void);
+  color: var(--g-text);
+  font-family: "Inter", system-ui, -apple-system, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+#aifight-gate .gate-card {
+  width: 100%;
+  max-width: 22rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  padding: 1.75rem;
+  background: var(--g-base);
+  border: 1px solid var(--g-line);
+  border-radius: 6px;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.6);
+}
+
+#aifight-gate .gate-title {
+  margin: 0;
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 0.8rem;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--g-muted);
+}
+
+#aifight-gate .gate-copy {
+  margin: 0;
+  font-size: 0.85rem;
+  line-height: 1.55;
+  color: var(--g-text);
+}
+#aifight-gate .gate-dim { color: var(--g-muted); }
+
+#aifight-gate .gate-status {
+  margin: 0;
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 0.75rem;
+  color: var(--g-muted);
+}
+
+#aifight-gate .gate-label {
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 0.65rem;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--g-muted);
+  margin-top: 0.5rem;
+}
+
+#aifight-gate .gate-input {
+  width: 100%;
+  padding: 0.6rem 0.75rem;
+  background: var(--g-void);
+  border: 1px solid var(--g-line-strong);
+  border-radius: 4px;
+  color: var(--g-text);
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 0.9rem;
+  /* 16px minimum on the input stops iOS Safari zooming the page on focus. */
+}
+@media (max-width: 640px) {
+  #aifight-gate .gate-input { font-size: 1rem; }
+}
+
+#aifight-gate .gate-input:focus-visible {
+  outline: 2px solid var(--g-accent);
+  outline-offset: 1px;
+  border-color: var(--g-accent);
+}
+
+#aifight-gate .gate-button {
+  margin-top: 0.35rem;
+  padding: 0.6rem 1rem;
+  background: var(--g-accent);
+  color: #05221a;
+  border: none;
+  border-radius: 4px;
+  font-family: "Inter", system-ui, sans-serif;
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: filter 140ms ease;
+}
+#aifight-gate .gate-button:hover:not(:disabled) { filter: brightness(1.08); }
+#aifight-gate .gate-button:disabled { opacity: 0.55; cursor: default; }
+#aifight-gate .gate-button:focus-visible {
+  outline: 2px solid var(--g-text);
+  outline-offset: 2px;
+}
+
+#aifight-gate .gate-error {
+  margin: 0;
+  min-height: 1.1rem;
+  font-size: 0.78rem;
+  color: var(--g-loss);
+}
+
+#aifight-gate .gate-pre {
+  margin: 0;
+  padding: 0.7rem 0.85rem;
+  background: var(--g-void);
+  border: 1px solid var(--g-line);
+  border-radius: 4px;
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 0.72rem;
+  line-height: 1.7;
+  color: var(--g-accent);
+  overflow-x: auto;
+}
+
+#aifight-gate code {
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 0.9em;
+  color: var(--g-text);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #aifight-gate * { transition: none !important; }
+}

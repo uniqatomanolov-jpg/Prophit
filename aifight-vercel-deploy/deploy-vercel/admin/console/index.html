@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AiFight — Command</title>
+<meta name="robots" content="noindex, nofollow, noarchive">
+<link rel="icon" href="/favicon.ico" type="image/x-icon">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap">
+<link rel="stylesheet" href="/admin-gate.css">
+<link rel="stylesheet" href="/admin-command.css">
+</head>
+<body>
+
+<div id="aifight-gate"></div>
+
+<main id="command" data-gated hidden>
+
+  <header class="cmd-head">
+    <div class="cmd-brand">
+      <p class="cmd-eyebrow">AiFight Command</p>
+      <h1 class="cmd-title">The €1,000,000 Challenge</h1>
+    </div>
+    <div class="cmd-head-right">
+      <span class="cmd-round" id="round-badge">Round —</span>
+      <button type="button" class="cmd-ghost" id="round-open" hidden>Open round</button>
+      <button type="button" class="cmd-ghost" id="round-advance">Advance</button>
+      <a class="cmd-link" href="/admin/log">Quick log</a>
+      <a class="cmd-link" href="/admin/prompts">Prompts</a>
+      <button type="button" class="cmd-ghost" id="logout">Log out</button>
+    </div>
+  </header>
+
+  <!-- Bankroll, ROI and daily exposure for all five, always on screen. -->
+  <section class="cmd-fighters" id="fighters" aria-label="Fighter standings"></section>
+
+  <div class="cmd-messages" id="messages" role="alert" aria-live="assertive"></div>
+
+  <div class="cmd-columns">
+
+    <!-- ================= LEFT: THE MATCH BOARD ================= -->
+    <section class="cmd-panel" aria-labelledby="board-heading">
+      <h2 class="cmd-panel-title" id="board-heading">
+        The Match Board
+        <span class="cmd-count" id="event-count"></span>
+      </h2>
+
+      <!-- Sport tabs drive every field and market below. -->
+      <div class="cmd-sports" role="tablist" aria-label="Sport" id="sport-tabs"></div>
+
+      <form id="event-form" novalidate>
+        <!-- Rendered from the server's registry, so the form can never offer
+             a field or market the server would reject. -->
+        <div id="event-fields"></div>
+
+        <div class="cmd-field">
+          <label for="e-kickoff">Kick-off <span class="cmd-hint">optional</span></label>
+          <input id="e-kickoff" type="datetime-local">
+        </div>
+
+        <h3 class="cmd-subhead">Odds matrix <span class="cmd-hint" id="matrix-hint"></span></h3>
+        <div id="matrix"></div>
+
+        <div class="cmd-actions">
+          <button type="submit" class="cmd-primary" id="create-event">Add to board</button>
+          <button type="button" class="cmd-ghost" id="clear-event">Clear</button>
+        </div>
+      </form>
+
+      <h3 class="cmd-subhead">On the board</h3>
+      <div class="cmd-events" id="events"><p class="cmd-empty">Loading…</p></div>
+    </section>
+
+    <!-- ============ RIGHT: DISPATCHER & SETTLER MATRIX ============ -->
+    <section class="cmd-panel" aria-labelledby="dispatch-heading">
+      <h2 class="cmd-panel-title" id="dispatch-heading">
+        AI Dispatcher &amp; Settler
+        <span class="cmd-integrity" id="integrity"></span>
+      </h2>
+
+      <p class="cmd-note" id="dispatch-note">
+        Pick a fixture from the board to log all five fighters against it.
+      </p>
+
+      <div class="cmd-field">
+        <label for="d-event">Active fixture</label>
+        <select id="d-event"><option value="">Select a fixture…</option></select>
+      </div>
+
+      <!-- One row per fighter: market, selection, stake, probability, thesis. -->
+      <div id="dispatch"></div>
+
+      <h3 class="cmd-subhead">
+        Open positions
+        <span class="cmd-count" id="open-count"></span>
+      </h3>
+      <div class="cmd-open" id="open"><p class="cmd-empty">None.</p></div>
+
+      <details class="cmd-audit">
+        <summary>Audit log <span class="cmd-count" id="audit-count"></span></summary>
+        <div id="audit"><p class="cmd-empty">Nothing yet this session.</p></div>
+      </details>
+    </section>
+
+  </div>
+</main>
+
+<script src="/admin-gate.js" data-app=""></script>
+<script src="/admin-command.js" defer></script>
+</body>
+</html>

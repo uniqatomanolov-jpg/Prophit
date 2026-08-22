@@ -1,0 +1,5 @@
+User-agent: *
+Allow: /
+Disallow: /admin-terminal
+
+Sitemap: https://ai-fight.netlify.app/sitemap.xml

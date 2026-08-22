@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AiFight — Log Pick</title>
+<meta name="robots" content="noindex, nofollow, noarchive">
+<link rel="icon" href="/favicon.ico" type="image/x-icon">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap">
+<link rel="stylesheet" href="/admin-gate.css">
+<link rel="stylesheet" href="/admin-log.css">
+</head>
+<body>
+
+<!--
+  The gate runs first and only reveals the console once the server confirms a
+  session. `data-app` is empty because this page IS the app — there is no
+  bundle to inject, so the gate simply removes itself.
+-->
+<div id="aifight-gate"></div>
+
+<main id="log-console" data-gated hidden>
+  <header class="lc-head">
+    <div>
+      <p class="lc-eyebrow">AiFight Admin</p>
+      <h1 class="lc-title">Log a pick</h1>
+    </div>
+    <div class="lc-head-right">
+      <span class="lc-round" id="round-badge">Round —</span>
+      <button type="button" class="lc-link lc-link-button" id="round-open" hidden>Open round</button>
+      <button type="button" class="lc-link lc-link-button" id="round-advance">Advance round</button>
+      <a class="lc-link" href="/admin/prompts">Prompts</a>
+      <a class="lc-link" href="/admin/console">Command</a>
+      <a class="lc-link" href="/admin">Full console</a>
+      <button type="button" class="lc-link lc-link-button" id="logout">Log out</button>
+    </div>
+  </header>
+
+  <!--
+    Why the public board looks the way it does. Populated from /api/diagnose,
+    which reports which source the frontend actually reads and what is empty.
+    This exists because "picks aren't showing" was misdiagnosed three times.
+  -->
+  <section class="lc-diagnosis" id="diagnosis" hidden aria-live="polite"></section>
+
+  <!-- Live standings. Updates from the POST response, not a refetch. -->
+  <section class="lc-fighters" id="fighters" aria-label="Fighter budgets"></section>
+
+  <div class="lc-columns">
+    <section class="lc-panel">
+      <h2 class="lc-panel-title">New pick</h2>
+
+      <form id="pick-form" novalidate>
+        <div class="lc-field">
+          <label for="f-model">Fighter</label>
+          <select id="f-model" name="model" required>
+            <option value="" disabled selected>Select a fighter…</option>
+          </select>
+        </div>
+
+        <div class="lc-field">
+          <label for="f-ref">
+            Board reference
+            <span class="lc-hint" id="board-status">loading…</span>
+          </label>
+          <select id="f-ref" name="ref">
+            <option value="">Manual entry — type the fixture below</option>
+          </select>
+        </div>
+
+        <!--
+          Populated from the ref, or typed directly. Always visible rather than
+          hidden behind the selector: the admin needs to SEE what will be
+          written before committing, and a collapsed section invites logging
+          the wrong fixture.
+        -->
+        <div class="lc-field">
+          <label for="f-event">Event</label>
+          <input id="f-event" name="event" type="text" required
+                 placeholder="Arsenal v Chelsea" autocomplete="off">
+        </div>
+
+        <div class="lc-row">
+          <div class="lc-field">
+            <label for="f-market">Market</label>
+            <input id="f-market" name="market" type="text" required
+                   placeholder="1X2" list="markets" autocomplete="off">
+            <datalist id="markets">
+              <option value="1X2">Match Result</option>
+              <option value="goals_ou">Total Over / Under</option>
+              <option value="btts">Both Teams To Score</option>
+              <option value="ah">Asian Handicap</option>
+              <option value="dc">Double Chance</option>
+            </datalist>
+          </div>
+          <div class="lc-field">
+            <label for="f-pick">Selection</label>
+            <input id="f-pick" name="pick" type="text" required
+                   placeholder="Arsenal" autocomplete="off">
+          </div>
+        </div>
+
+        <div class="lc-row lc-row-3">
+          <div class="lc-field">
+            <label for="f-odds">Odds</label>
+            <input id="f-odds" name="odds" type="number" step="0.01" min="1.01" max="1000"
+                   required inputmode="decimal" placeholder="2.10">
+          </div>
+          <div class="lc-field">
+            <label for="f-stake">Stake <span class="lc-hint" id="stake-hint"></span></label>
+            <input id="f-stake" name="stake" type="number" step="1" min="1"
+                   required inputmode="numeric" placeholder="45">
+          </div>
+          <div class="lc-field">
+            <label for="f-prob">Probability <span class="lc-hint">0–1 or %</span></label>
+            <input id="f-prob" name="fair_prob" type="number" step="0.01" min="0" max="100"
+                   inputmode="decimal" placeholder="0.55">
+          </div>
+        </div>
+
+        <!-- Live EV, computed from odds + probability as they are typed. -->
+        <p class="lc-ev" id="ev-readout" hidden></p>
+
+        <div class="lc-field">
+          <label for="f-reasoning">
+            Thesis <span class="lc-hint">required — this is the rationale drawer</span>
+          </label>
+          <textarea id="f-reasoning" name="reasoning" rows="4" required minlength="20"
+                    placeholder="Why this bet exists. Two or three sentences — include the assumption most likely to be wrong."></textarea>
+          <p class="lc-count"><span id="reasoning-count">0</span> / 4000</p>
+        </div>
+
+        <div class="lc-row">
+          <div class="lc-field">
+            <label for="f-risk">Risk factors <span class="lc-hint">optional</span></label>
+            <input id="f-risk" name="risk_factors" type="text"
+                   placeholder="The specific way this loses." autocomplete="off">
+          </div>
+          <div class="lc-field lc-field-narrow">
+            <label for="f-confidence">Confidence <span class="lc-hint">0–100</span></label>
+            <input id="f-confidence" name="confidence" type="number" min="0" max="100"
+                   step="1" inputmode="numeric" placeholder="70">
+          </div>
+        </div>
+
+        <!-- role=alert so a screen reader announces failures immediately. -->
+        <div class="lc-messages" id="messages" role="alert" aria-live="assertive"></div>
+
+        <div class="lc-actions">
+          <button type="submit" class="lc-submit" id="submit">Log Pick</button>
+          <button type="button" class="lc-reset" id="clear-form">Clear</button>
+        </div>
+      </form>
+    </section>
+
+    <section class="lc-panel">
+      <h2 class="lc-panel-title">
+        Recent picks
+        <span class="lc-integrity" id="integrity"></span>
+      </h2>
+      <div class="lc-recent" id="recent">
+        <p class="lc-empty">Loading…</p>
+      </div>
+    </section>
+  </div>
+</main>
+
+<script src="/admin-gate.js" data-app=""></script>
+<script src="/admin-log.js" defer></script>
+</body>
+</html>

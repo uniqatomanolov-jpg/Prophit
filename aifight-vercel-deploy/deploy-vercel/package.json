@@ -1,0 +1,9 @@
+{
+  "name": "aifight-site",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@vercel/blob": "^2.8.0",
+    "@supabase/supabase-js": "^2.112.2"
+  }
+}

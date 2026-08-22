@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AiFight — Persona Prompts</title>
+<meta name="robots" content="noindex, nofollow, noarchive">
+<link rel="icon" href="/favicon.ico" type="image/x-icon">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap">
+<link rel="stylesheet" href="/admin-gate.css">
+<link rel="stylesheet" href="/admin-log.css">
+<style>
+  /*
+   * Prompt-specific styling. Reuses the logging console's tokens so the two
+   * admin pages read as one product.
+   */
+  .pp-intro { max-width: 68ch; margin: 0 0 1.5rem; color: var(--lc-text-2); font-size: 0.9rem; }
+  .pp-intro strong { color: var(--lc-text); font-weight: 600; }
+
+  .pp-tabs { display: flex; flex-wrap: wrap; gap: 0.4rem; margin-bottom: 1rem; }
+  .pp-tab {
+    padding: 0.45rem 0.8rem;
+    background: var(--lc-base);
+    border: 1px solid var(--lc-line);
+    border-radius: 4px;
+    color: var(--lc-muted);
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+    font-size: 0.7rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    cursor: pointer;
+    transition: border-color 140ms ease, color 140ms ease;
+  }
+  .pp-tab:hover { color: var(--lc-text); border-color: var(--lc-line-strong); }
+  .pp-tab[aria-selected="true"] { color: var(--lc-void); background: var(--accent, var(--lc-profit)); border-color: transparent; }
+  .pp-tab:focus-visible { outline: 2px solid var(--lc-info); outline-offset: 2px; }
+
+  .pp-meta { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.6rem 1rem; margin-bottom: 0.75rem; }
+  .pp-handle { font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 1.1rem; font-weight: 700; letter-spacing: -0.01em; }
+  .pp-role { font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 0.62rem; letter-spacing: 0.1em; text-transform: uppercase; color: var(--lc-muted); }
+  .pp-tagline { color: var(--lc-text-2); font-size: 0.85rem; }
+
+  .pp-actions { display: flex; gap: 0.5rem; margin-bottom: 0.75rem; flex-wrap: wrap; }
+  .pp-copy {
+    padding: 0.5rem 0.9rem;
+    background: var(--lc-profit); color: #05221a;
+    border: none; border-radius: 4px;
+    font-family: "Inter", system-ui, sans-serif; font-size: 0.82rem; font-weight: 600;
+    cursor: pointer; transition: filter 140ms ease;
+  }
+  .pp-copy:hover { filter: brightness(1.08); }
+  .pp-copy.is-done { background: var(--lc-info); }
+  .pp-open {
+    padding: 0.5rem 0.9rem;
+    background: transparent; color: var(--lc-text-2);
+    border: 1px solid var(--lc-line-strong); border-radius: 4px;
+    font-size: 0.82rem; text-decoration: none; display: inline-flex; align-items: center;
+  }
+  .pp-open:hover { color: var(--lc-text); border-color: var(--lc-text-2); }
+
+  .pp-prompt {
+    margin: 0;
+    padding: 1rem 1.1rem;
+    background: var(--lc-void);
+    border: 1px solid var(--lc-line);
+    border-radius: 4px;
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+    font-size: 0.74rem;
+    line-height: 1.65;
+    color: var(--lc-text-2);
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-height: 30rem;
+    overflow-y: auto;
+    scrollbar-width: thin;
+    scrollbar-color: var(--lc-line-strong) transparent;
+  }
+  .pp-note { margin: 0.6rem 0 0; font-size: 0.76rem; color: var(--lc-muted); }
+</style>
+</head>
+<body>
+
+<div id="aifight-gate"></div>
+
+<main id="prompt-console" data-gated hidden>
+  <header class="lc-head">
+    <div>
+      <p class="lc-eyebrow">AiFight Admin</p>
+      <h1 class="lc-title">Persona prompts</h1>
+    </div>
+    <div class="lc-head-right">
+      <a class="lc-link" href="/admin/log">Log a pick</a>
+      <a class="lc-link" href="/admin/console">Command</a>
+      <a class="lc-link" href="/admin">Full console</a>
+    </div>
+  </header>
+
+  <p class="pp-intro">
+    Five professional identities, each leading with a <strong>different class of evidence</strong> and
+    forbidden from leading with another's. That is what makes disagreement between them
+    informative rather than noise. Paste one as the system prompt (or the first message)
+    for its model, then paste the round's board underneath it.
+    Every reply must carry a <strong>core_thesis</strong> — that field is what the public
+    rationale drawer publishes.
+  </p>
+
+  <div class="pp-tabs" role="tablist" aria-label="Persona"></div>
+
+  <section class="lc-panel">
+    <div class="pp-meta">
+      <span class="pp-handle" id="pp-handle">—</span>
+      <span class="pp-role" id="pp-role"></span>
+      <span class="pp-tagline" id="pp-tagline"></span>
+    </div>
+
+    <div class="pp-actions">
+      <button type="button" class="pp-copy" id="pp-copy">Copy full prompt</button>
+      <button type="button" class="pp-copy" id="pp-copy-contract" style="background:var(--lc-line-strong);color:var(--lc-text)">Copy schema contract only</button>
+      <a class="pp-open" id="pp-open" href="#" target="_blank" rel="noopener noreferrer">Open the model ↗</a>
+    </div>
+
+    <pre class="pp-prompt" id="pp-prompt">Loading…</pre>
+    <p class="pp-note" id="pp-note"></p>
+  </section>
+</main>
+
+<script src="/admin-gate.js" data-app=""></script>
+<script src="/admin-personas.js"></script>
+<script src="/admin-prompts.js" defer></script>
+</body>
+</html>

@@ -1,0 +1,539 @@
+/*
+ * Manual logging console.
+ *
+ * Same token vocabulary as src/styles/terminal.css so this page and the main
+ * console read as one product. Self-contained rather than importing the app's
+ * stylesheet, because this page must render correctly before — and without —
+ * the application bundle.
+ *
+ * Density is the point. An admin logging fifteen picks wants every field and
+ * the running budget on one screen; a spacious form that scrolls costs a
+ * scroll per pick and hides the number that decides the next stake.
+ */
+
+:root {
+  --lc-void: #05070a;
+  --lc-base: #0a0d13;
+  --lc-raised: #11151d;
+  --lc-overlay: #171c26;
+  --lc-line: #1f2530;
+  --lc-line-strong: #2b3341;
+  --lc-text: #e8edf5;
+  --lc-text-2: #a9b4c4;
+  --lc-muted: #7b8798;
+  --lc-profit: #2ee6a8;
+  --lc-loss: #ff5c72;
+  --lc-warn: #ffb454;
+  --lc-info: #58a6ff;
+  --lc-radius: 5px;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--lc-void);
+  color: var(--lc-text);
+  font-family: "Inter", system-ui, -apple-system, sans-serif;
+  font-size: 15px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+#log-console[hidden] { display: none; }
+
+#log-console {
+  max-width: 1240px;
+  margin: 0 auto;
+  padding: clamp(1rem, 3vw, 2rem);
+}
+
+/* ---- Header ---- */
+
+.lc-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 1rem;
+  padding-bottom: 1rem;
+  border-bottom: 1px solid var(--lc-line);
+  margin-bottom: 1.25rem;
+}
+
+.lc-eyebrow {
+  margin: 0;
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 0.65rem;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--lc-muted);
+}
+
+.lc-title {
+  margin: 0.25rem 0 0;
+  font-size: 1.5rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.lc-head-right {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.lc-round {
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 0.7rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--lc-muted);
+  padding: 0.25rem 0.6rem;
+  border: 1px solid var(--lc-line-strong);
+  border-radius: var(--lc-radius);
+}
+
+.lc-link {
+  font-size: 0.8rem;
+  color: var(--lc-info);
+  text-decoration: none;
+  border-bottom: 1px solid transparent;
+}
+.lc-link:hover { border-bottom-color: currentColor; }
+
+.lc-link-button {
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.8rem;
+  color: var(--lc-muted);
+}
+.lc-link-button:hover { color: var(--lc-text); }
+
+/* ---- Fighter strip ---- */
+
+.lc-fighters {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(9.5rem, 1fr));
+  gap: 0.65rem;
+  margin-bottom: 1.25rem;
+}
+
+.lc-fighter {
+  background: var(--lc-base);
+  border: 1px solid var(--lc-line);
+  border-radius: var(--lc-radius);
+  padding: 0.7rem 0.8rem;
+  cursor: pointer;
+  transition: border-color 140ms ease, background 140ms ease;
+}
+.lc-fighter:hover { border-color: var(--lc-line-strong); background: var(--lc-raised); }
+.lc-fighter.is-selected {
+  border-color: var(--lc-profit);
+  background: var(--lc-raised);
+  box-shadow: inset 0 0 0 1px rgba(46, 230, 168, 0.18);
+}
+
+.lc-fighter-name {
+  margin: 0;
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--lc-muted);
+}
+
+.lc-fighter-bankroll {
+  margin: 0.25rem 0 0;
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-variant-numeric: tabular-nums;
+  font-size: 1.15rem;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+.lc-fighter-bankroll[data-delta="up"] { color: var(--lc-profit); }
+.lc-fighter-bankroll[data-delta="down"] { color: var(--lc-loss); }
+.lc-fighter-bankroll[data-delta="flat"] { color: var(--lc-text); }
+
+/* Budget consumed today. Fills as the day is spent; red when nothing is left. */
+.lc-bar {
+  height: 3px;
+  background: var(--lc-overlay);
+  border-radius: 2px;
+  margin: 0.5rem 0 0.4rem;
+  overflow: hidden;
+}
+.lc-bar-fill {
+  height: 100%;
+  background: var(--lc-info);
+  transition: width 220ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+.lc-bar-fill.is-spent { background: var(--lc-loss); }
+
+.lc-fighter-meta,
+.lc-fighter-record {
+  margin: 0;
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-variant-numeric: tabular-nums;
+  font-size: 0.65rem;
+  color: var(--lc-muted);
+}
+.lc-fighter-record { margin-top: 0.15rem; }
+
+/* ---- Layout ---- */
+
+.lc-columns {
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(0, 0.85fr);
+  gap: 1rem;
+  align-items: start;
+}
+@media (max-width: 900px) {
+  .lc-columns { grid-template-columns: 1fr; }
+}
+
+.lc-panel {
+  background: var(--lc-base);
+  border: 1px solid var(--lc-line);
+  border-radius: var(--lc-radius);
+  padding: 1.1rem 1.2rem 1.25rem;
+}
+
+.lc-panel-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin: 0 0 1rem;
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--lc-muted);
+}
+
+.lc-integrity {
+  font-size: 0.6rem;
+  letter-spacing: 0.06em;
+  padding: 0.15rem 0.45rem;
+  border-radius: 3px;
+}
+.lc-integrity.is-ok { color: var(--lc-profit); background: rgba(46, 230, 168, 0.1); }
+.lc-integrity.is-broken { color: var(--lc-loss); background: rgba(255, 92, 114, 0.12); }
+
+/* ---- Form ---- */
+
+.lc-field { display: flex; flex-direction: column; gap: 0.3rem; margin-bottom: 0.85rem; }
+
+.lc-field label {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 0.63rem;
+  font-weight: 600;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--lc-muted);
+}
+
+.lc-hint {
+  font-weight: 400;
+  letter-spacing: 0.02em;
+  text-transform: none;
+  color: var(--lc-muted);
+  opacity: 0.85;
+}
+
+.lc-row { display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; }
+.lc-row-3 { grid-template-columns: repeat(3, 1fr); }
+.lc-field-narrow { max-width: 100%; }
+@media (max-width: 560px) {
+  .lc-row, .lc-row-3 { grid-template-columns: 1fr; }
+}
+
+.lc-field input,
+.lc-field select,
+.lc-field textarea {
+  width: 100%;
+  padding: 0.5rem 0.65rem;
+  background: var(--lc-void);
+  border: 1px solid var(--lc-line-strong);
+  border-radius: 4px;
+  color: var(--lc-text);
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 0.85rem;
+  /* 16px on mobile stops iOS Safari zooming the page on focus. */
+}
+@media (max-width: 640px) {
+  .lc-field input, .lc-field select, .lc-field textarea { font-size: 1rem; }
+}
+
+.lc-field textarea {
+  font-family: "Inter", system-ui, sans-serif;
+  font-size: 0.88rem;
+  line-height: 1.5;
+  resize: vertical;
+  min-height: 5rem;
+}
+
+.lc-field input:focus-visible,
+.lc-field select:focus-visible,
+.lc-field textarea:focus-visible {
+  outline: 2px solid var(--lc-profit);
+  outline-offset: 1px;
+  border-color: var(--lc-profit);
+}
+
+/* Filled from the board rather than typed — dimmed so it reads as derived. */
+.lc-field input.is-derived {
+  background: var(--lc-raised);
+  color: var(--lc-text-2);
+  border-color: var(--lc-line);
+}
+
+.lc-count {
+  margin: 0.1rem 0 0;
+  text-align: right;
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 0.6rem;
+  color: var(--lc-muted);
+}
+
+.lc-ev {
+  margin: 0 0 0.85rem;
+  padding: 0.45rem 0.7rem;
+  border-radius: 4px;
+  background: var(--lc-raised);
+  border: 1px solid var(--lc-line);
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-variant-numeric: tabular-nums;
+  font-size: 0.75rem;
+}
+.lc-ev[data-delta="up"] { color: var(--lc-profit); border-color: rgba(46, 230, 168, 0.25); }
+.lc-ev[data-delta="down"] { color: var(--lc-loss); border-color: rgba(255, 92, 114, 0.25); }
+.lc-ev[data-delta="flat"] { color: var(--lc-muted); }
+
+/* ---- Messages ---- */
+
+.lc-messages:empty { display: none; }
+.lc-messages { margin-bottom: 0.85rem; display: flex; flex-direction: column; gap: 0.5rem; }
+
+.lc-msg {
+  padding: 0.6rem 0.8rem;
+  border-radius: 4px;
+  border-left: 3px solid;
+  font-size: 0.83rem;
+}
+.lc-msg p { margin: 0; }
+.lc-msg p + p { margin-top: 0.3rem; }
+
+.lc-msg-error { background: rgba(255, 92, 114, 0.09); border-color: var(--lc-loss); color: #ffc0c8; }
+.lc-msg-success { background: rgba(46, 230, 168, 0.09); border-color: var(--lc-profit); color: #9df0d3; }
+.lc-msg-warn { background: rgba(255, 180, 84, 0.09); border-color: var(--lc-warn); color: #ffd9a3; }
+
+/* ---- Actions ---- */
+
+.lc-actions { display: flex; gap: 0.6rem; align-items: center; }
+
+.lc-submit {
+  flex: 1;
+  padding: 0.65rem 1rem;
+  background: var(--lc-profit);
+  color: #05221a;
+  border: none;
+  border-radius: 4px;
+  font-family: "Inter", system-ui, sans-serif;
+  font-size: 0.9rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: filter 140ms ease;
+}
+.lc-submit:hover:not(:disabled) { filter: brightness(1.08); }
+.lc-submit:disabled { opacity: 0.5; cursor: default; }
+
+.lc-reset {
+  padding: 0.65rem 1rem;
+  background: transparent;
+  color: var(--lc-muted);
+  border: 1px solid var(--lc-line-strong);
+  border-radius: 4px;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+.lc-reset:hover { color: var(--lc-text); border-color: var(--lc-text-2); }
+
+.lc-submit:focus-visible,
+.lc-reset:focus-visible {
+  outline: 2px solid var(--lc-info);
+  outline-offset: 2px;
+}
+
+/* ---- Recent picks ---- */
+
+.lc-recent {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+  max-height: 34rem;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--lc-line-strong) transparent;
+}
+
+.lc-empty { margin: 0; color: var(--lc-muted); font-size: 0.85rem; }
+
+.lc-bet {
+  position: relative;
+  background: var(--lc-raised);
+  border: 1px solid var(--lc-line);
+  border-radius: 4px;
+  padding: 0.6rem 0.75rem;
+}
+
+.lc-bet-head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.25rem;
+}
+
+.lc-bet-model {
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--lc-text);
+}
+
+.lc-bet-id {
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 0.62rem;
+  color: var(--lc-muted);
+}
+
+.lc-bet-result {
+  margin-left: auto;
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 0.58rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 0.1rem 0.4rem;
+  border-radius: 3px;
+}
+.lc-bet-result.pending { color: var(--lc-muted); background: var(--lc-overlay); }
+.lc-bet-result.win { color: var(--lc-profit); background: rgba(46, 230, 168, 0.12); }
+.lc-bet-result.loss { color: var(--lc-loss); background: rgba(255, 92, 114, 0.12); }
+.lc-bet-result.void,
+.lc-bet-result.push { color: var(--lc-warn); background: rgba(255, 180, 84, 0.12); }
+
+.lc-bet-event {
+  margin: 0;
+  font-size: 0.82rem;
+  color: var(--lc-text-2);
+}
+
+.lc-bet-line {
+  margin: 0.15rem 0 0;
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-variant-numeric: tabular-nums;
+  font-size: 0.75rem;
+  color: var(--lc-text);
+}
+
+.lc-bet-thesis {
+  margin: 0.4rem 0 0;
+  padding-top: 0.4rem;
+  border-top: 1px solid var(--lc-line);
+  font-size: 0.78rem;
+  line-height: 1.45;
+  color: var(--lc-muted);
+  /* Long theses are clamped: the drawer on the public site is where they are
+     read in full, and an un-clamped block would push the form off screen. */
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.lc-bet-remove {
+  position: absolute;
+  right: 0.5rem;
+  bottom: 0.5rem;
+  background: transparent;
+  border: 1px solid var(--lc-line-strong);
+  border-radius: 3px;
+  color: var(--lc-muted);
+  font-size: 0.62rem;
+  padding: 0.15rem 0.4rem;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 140ms ease, color 140ms ease, border-color 140ms ease;
+}
+.lc-bet:hover .lc-bet-remove,
+.lc-bet-remove:focus-visible { opacity: 1; }
+.lc-bet-remove:hover { color: var(--lc-loss); border-color: var(--lc-loss); }
+/* Always visible on touch, where there is no hover to reveal it. */
+@media (hover: none) {
+  .lc-bet-remove { opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; animation: none !important; }
+}
+
+/* ---- Arena diagnosis ---- */
+/*
+ * Not decoration. Each row is a measured reason the public board is showing
+ * what it shows, ranked by severity, with the fix stated. It replaces the
+ * guesswork that produced three wrong diagnoses of "picks aren't showing".
+ */
+.lc-diagnosis { display: flex; flex-direction: column; gap: 0.5rem; margin-bottom: 1.25rem; }
+.lc-diagnosis[hidden] { display: none; }
+
+.lc-finding {
+  padding: 0.7rem 0.9rem;
+  background: var(--lc-base);
+  border: 1px solid var(--lc-line);
+  border-left: 3px solid var(--lc-muted);
+  border-radius: 4px;
+}
+.lc-finding[data-sev="critical"] { border-left-color: var(--lc-loss); }
+.lc-finding[data-sev="high"]     { border-left-color: var(--lc-warn); }
+.lc-finding[data-sev="ok"]       { border-left-color: var(--lc-profit); }
+
+.lc-finding-head {
+  display: flex; align-items: baseline; gap: 0.6rem; flex-wrap: wrap;
+  margin-bottom: 0.3rem;
+}
+.lc-finding-sev {
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 0.58rem; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase;
+  padding: 0.1rem 0.4rem; border-radius: 3px;
+}
+.lc-finding[data-sev="critical"] .lc-finding-sev { color: var(--lc-loss); background: rgba(255,92,114,0.12); }
+.lc-finding[data-sev="high"]     .lc-finding-sev { color: var(--lc-warn); background: rgba(255,180,84,0.12); }
+.lc-finding[data-sev="ok"]       .lc-finding-sev { color: var(--lc-profit); background: rgba(46,230,168,0.12); }
+
+.lc-finding-title { font-size: 0.88rem; font-weight: 600; color: var(--lc-text); }
+.lc-finding-detail { margin: 0; font-size: 0.8rem; line-height: 1.5; color: var(--lc-text-2); }
+.lc-finding-fix {
+  margin: 0.4rem 0 0; padding-top: 0.4rem; border-top: 1px solid var(--lc-line);
+  font-size: 0.78rem; color: var(--lc-muted);
+}
+.lc-finding-fix b { color: var(--lc-profit); font-weight: 600; }
+
+.lc-source {
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 0.6rem; letter-spacing: 0.08em; text-transform: uppercase;
+  color: var(--lc-muted);
+}
