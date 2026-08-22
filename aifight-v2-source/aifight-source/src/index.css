@@ -1,0 +1,87 @@
+/*
+ * Fonts first: an @import must precede every other rule, including
+ * Tailwind's directives, or the browser discards it silently.
+ */
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap");
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    color-scheme: dark;
+    /* The obsidian ground. Referenced by name so the value lives in one
+       place rather than being retyped as #050508 across components. */
+    --obsidian: #050508;
+  }
+
+  html {
+    background-color: var(--obsidian);
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    margin: 0;
+    background-color: var(--obsidian);
+    font-family: "Inter", ui-sans-serif, system-ui, -apple-system, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  /*
+   * Number inputs: hide the spinners. The stake and odds fields are typed,
+   * and a stray scroll over a focused number input silently changes a bet.
+   */
+  input[type="number"] {
+    -moz-appearance: textfield;
+    appearance: textfield;
+  }
+  input[type="number"]::-webkit-outer-spin-button,
+  input[type="number"]::-webkit-inner-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+  }
+
+  /* The date picker's indicator is black-on-black by default. */
+  input[type="datetime-local"]::-webkit-calendar-picker-indicator {
+    filter: invert(0.7);
+    cursor: pointer;
+  }
+
+  /* Dark scrollbars, so a scrolling panel does not flash a white gutter. */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(255, 255, 255, 0.15) transparent;
+  }
+  *::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  *::-webkit-scrollbar-thumb {
+    background-color: rgba(255, 255, 255, 0.15);
+    border-radius: 4px;
+  }
+  *::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  /* A visible focus ring everywhere. The admin is used at speed and by
+     keyboard, and the default ring is invisible on this background. */
+  :focus-visible {
+    outline: 2px solid rgb(52 211 153 / 0.7);
+    outline-offset: 2px;
+  }
+
+  /* Respect a reduced-motion preference. The progress bars and pulses are
+     decorative and none of them carry information on their own. */
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+    }
+  }
+}
